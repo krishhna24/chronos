@@ -183,9 +183,9 @@
 //     Annotations can include kubectl's last-applied-configuration with the
 //     full Secret, which normalize strips; managedFields name the data
 //     keys, so normalize always drops them for metadata-only types.
-//   - ASSUMPTION (checked by the integration test against kind): TypeMeta
-//     of returned items is meta.k8s.io/v1 PartialObjectMetadata, not
-//     v1 Secret; normalize sets apiVersion/kind from the resource type.
+//   - VERIFIED by the integration test against kind (server v1.37.0):
+//     items of a metadata LIST carry an empty TypeMeta (not v1/Secret), so
+//     normalize always sets apiVersion/kind from the resource type.
 //
 // Memory, Reflector + custom store vs SharedInformer, 10k+ objects:
 //
