@@ -51,8 +51,12 @@ type Store interface {
 	// the batch is durable (survives process crash). The assigned Seq and
 	// clamped times are written back into the entries.
 	//
-	// Any non-nil error means nothing from the batch was applied, so the
-	// caller may retry it. If an implementation cannot guarantee that (for
+	// Any non-nil error that does not wrap ErrClosed means nothing from the
+	// batch was applied, so the caller may retry it. An error wrapping
+	// ErrClosed means the outcome is unknown (the store was closed or
+	// poisoned mid-commit): the batch may be durable, so callers must not
+	// replay it against a reopened store; the next start's relist
+	// reconciles state instead. If an implementation cannot guarantee that (for
 	// example, a durable-sync failure after the commit point), it must stop
 	// accepting writes and return an error wrapping ErrClosed from then on,
 	// so the batch is never applied twice.
