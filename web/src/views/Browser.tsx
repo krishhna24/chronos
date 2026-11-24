@@ -1,12 +1,12 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { client } from '../api/client';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
+import type { ListParams } from '../api/client';
 import type { ObjectState } from '../api/types';
 import { Empty, ErrorBox, Loading } from '../components/common';
 import { followLink, Link } from '../components/Link';
 import { ObjectList } from '../components/ObjectList';
 import { TimePicker } from '../components/TimePicker';
 import { useChronos } from '../context';
-import { useAsync } from '../lib/useAsync';
+import { usePagedList } from '../lib/usePagedList';
 import { hrefFor, type AppState } from '../lib/urlState';
 
 export function Browser({ state, update }: { state: AppState; update: (p: Partial<AppState>, o?: { replace?: boolean }) => void }) {
@@ -21,20 +21,22 @@ export function Browser({ state, update }: { state: AppState; update: (p: Partia
   useEffect(() => setSel(state.labelSelector ?? ''), [state.labelSelector]);
 
   const listKey = res ? JSON.stringify([res.id, state.namespace, state.at, state.labelSelector, state.includeDeleted]) : null;
-  const [list, reload] = useAsync(
-    (signal) =>
-      client.list(
-        {
-          resource: res!.id,
-          namespace: res!.namespaced ? state.namespace : undefined,
-          at: state.at,
-          labelSelector: state.labelSelector,
-          includeDeleted: state.includeDeleted,
-        },
-        signal,
-      ),
-    listKey,
+  const listParams = useMemo<ListParams | null>(
+    () =>
+      res
+        ? {
+            resource: res.id,
+            namespace: res.namespaced ? state.namespace : undefined,
+            at: state.at,
+            labelSelector: state.labelSelector,
+            includeDeleted: state.includeDeleted,
+          }
+        : null,
+    // listKey captures every field read here.
+    [listKey],
   );
+  const paged = usePagedList(listParams, listKey);
+  const { state: list, reload } = paged;
   if (list.status === 'success') for (const it of list.data.items) if (it.key.namespace) seenNamespaces.current.add(it.key.namespace);
 
   if (resources.status === 'loading' || resources.status === 'idle') return <Loading label="Loading resource types…" />;
@@ -121,6 +123,7 @@ export function Browser({ state, update }: { state: AppState; update: (p: Partia
           labelSelector={state.labelSelector}
           horizon={resources.data.horizon}
           onReload={reload}
+          paging={{ pages: paged.pages, loadingMore: paged.loadingMore, error: paged.moreError, onLoadMore: paged.loadMore }}
           hrefFor={(item) => hrefFor(detail(item))}
           onOpen={(item, e) => followLink(e, detail(item))}
           rowActions={(item) =>

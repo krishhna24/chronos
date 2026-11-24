@@ -1,6 +1,6 @@
 // End-to-end-ish: the real App and views against the mock backend (the
 // same fetch interceptor `pnpm dev:mock` uses), in jsdom.
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { App } from './App';
 import { ChronosProvider } from './context';
@@ -85,6 +85,35 @@ describe('App in mock mode', () => {
     const tree = await screen.findByRole('list', { name: 'Ownership tree' });
     expect(within(tree).getByRole('link', { name: 'worker-7f6e5d4c3' })).toBeTruthy();
     expect(within(tree).queryByRole('link', { name: 'worker-5c8d9b6f7' })).toBeNull();
+    // Six prod pods exist then and mock pages hold five: worker's pods sort
+    // last, so they are only present if every page was fetched.
+    expect(within(tree).getAllByRole('link', { name: /^worker-7f6e5d4c3-/ }).length).toBe(2);
+  });
+
+  it('browser loads further pages with Load more', async () => {
+    // 8 pods exist now across namespaces; mock pages hold 5.
+    open('?view=browse&resource=v1%2Fpods');
+    const table = await screen.findByRole('table');
+    expect(table.querySelectorAll('tbody tr').length).toBe(5);
+    expect(table.querySelector('caption')?.textContent).toMatch(/5 Pod objects loaded so far .*more available/);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Load more' })));
+    await waitFor(() => expect(screen.getByRole('table').querySelectorAll('tbody tr').length).toBe(8));
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+    expect(screen.getByRole('table').querySelector('caption')?.textContent).toMatch(/^8 Pod objects at/);
+    // Ordering is preserved across pages (namespace, then name).
+    const names = [...screen.getByRole('table').querySelectorAll('tbody th')].map((th) => th.textContent);
+    expect(names.slice(-2)).toEqual(['web-84bd7c9f5-4tq8w', 'web-84bd7c9f5-zc6rn']);
+  });
+
+  it('changing filters discards loaded pages', async () => {
+    open('?view=browse&resource=v1%2Fpods');
+    await screen.findByRole('table');
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Load more' })));
+    await waitFor(() => expect(screen.getByRole('table').querySelectorAll('tbody tr').length).toBe(8));
+    fireEvent.change(screen.getByLabelText('Namespace'), { target: { value: 'staging' } });
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Apply' })));
+    await waitFor(() => expect(screen.getByRole('table').querySelectorAll('tbody tr').length).toBe(2));
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
   });
 
   it('shows a server error from the API', async () => {

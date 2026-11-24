@@ -106,7 +106,33 @@ function matchesSelector(labels: Record<string, string>, selector: string): bool
     });
 }
 
-export function createMockServer(fx: Fixture, clock: () => number = Date.now) {
+export interface MockServerOptions {
+  /** Page size of /list when the request has no `limit`. The real server
+   * uses 500; mock mode uses a small value so paging is exercised. */
+  defaultListLimit?: number;
+}
+
+interface ContinueToken {
+  at: string;
+  /** Sort key of the last item returned. */
+  after: string;
+  /** The listing's other parameters, which must not change between pages. */
+  params: string;
+}
+
+const encodeToken = (t: ContinueToken) => btoa(JSON.stringify(t));
+function decodeToken(s: string): ContinueToken {
+  try {
+    const t = JSON.parse(atob(s)) as ContinueToken;
+    if (typeof t.at === 'string' && typeof t.after === 'string' && typeof t.params === 'string') return t;
+  } catch {
+    // fall through
+  }
+  throw bad('invalid continue token');
+}
+
+export function createMockServer(fx: Fixture, clock: () => number = Date.now, opts: MockServerOptions = {}) {
+  const defaultListLimit = opts.defaultListLimit ?? 500;
   const byKey = new Map<string, FixtureRecord[]>();
   for (const r of fx.records) {
     const k = `${r.resource}\u0000${r.namespace}\u0000${r.name}`;
@@ -180,8 +206,10 @@ export function createMockServer(fx: Fixture, clock: () => number = Date.now) {
       const rec = byKey.get(`${res.id}\u0000${ns}\u0000${name}`)?.find((r) => r.seq === seq);
       if (!rec) throw bad(`no record with seq ${q.get('seq')} for ${res.id}/${ns}/${name}`);
       const st = stateOf(res, ns, name, rec.observedAt, rec);
-      // A specific record: show what it recorded even for deletes.
-      st.object = rec.object;
+      // The record itself, even outside observed coverage -- but, as on the
+      // server, a delete record carries no object.
+      if (rec.type !== 'Deleted') st.object = rec.object;
+      else delete st.object;
       return st;
     },
 
@@ -191,6 +219,21 @@ export function createMockServer(fx: Fixture, clock: () => number = Date.now) {
       const ns = q.get('namespace') ?? '';
       const sel = q.get('labelSelector') ?? '';
       const includeDeleted = q.get('includeDeleted') === 'true';
+      const limitRaw = q.get('limit');
+      const limit = limitRaw === null || limitRaw === '' ? defaultListLimit : Number(limitRaw);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 5000) {
+        throw bad(`parameter "limit": ${JSON.stringify(limitRaw)} must be an integer between 1 and 5000`);
+      }
+      const params = JSON.stringify([res.id, ns, sel, includeDeleted]);
+      const cont = q.get('continue');
+      let after = '';
+      if (cont) {
+        if (!q.get('at')) throw bad('parameter "at" is required with "continue"');
+        const tok = decodeToken(cont);
+        if (compareTime(tok.at, at) !== 0) throw bad('continue token was issued for a different "at"');
+        if (tok.params !== params) throw bad('continue token was issued for different list parameters');
+        after = tok.after;
+      }
       const coverage = coverageAt(res, at, fx.horizon);
       const items: ObjectState[] = [];
       if (coverage.state === 'observed' || coverage.state === 'gap') {
@@ -199,7 +242,9 @@ export function createMockServer(fx: Fixture, clock: () => number = Date.now) {
           if (first.resource !== res.id || (ns && first.namespace !== ns)) continue;
           const latest = latestAt(records, at);
           if (!latest) continue;
-          if (latest.type === 'Deleted' && !(includeDeleted && coverage.state === 'observed')) continue;
+          // Deleted keys: "absent" when observed, "unknown" (version only)
+          // during a gap -- stateOf applies that rule.
+          if (latest.type === 'Deleted' && !includeDeleted) continue;
           const labels = ((latest.object.metadata as { labels?: Record<string, string> } | undefined)?.labels ?? {});
           if (sel && !matchesSelector(labels, sel)) continue;
           items.push(stateOf(res, first.namespace, first.name, at, latest));
@@ -207,8 +252,13 @@ export function createMockServer(fx: Fixture, clock: () => number = Date.now) {
       } else if (sel) {
         matchesSelector({}, sel); // still validate
       }
-      items.sort((a, b) => (a.key.namespace ?? '').localeCompare(b.key.namespace ?? '') || a.key.name.localeCompare(b.key.name));
-      return { at, coverage, items };
+      const sortKey = (i: ObjectState) => `${i.key.namespace ?? ''}\u0000${i.key.name}`;
+      items.sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0));
+      const rest = after ? items.filter((i) => sortKey(i) > after) : items;
+      const page = rest.slice(0, limit);
+      const out: ListResponse = { at, coverage, items: page };
+      if (rest.length > limit) out.continue = encodeToken({ at, after: sortKey(page[page.length - 1]!), params });
+      return out;
     },
 
     history: (q): HistoryResponse => {
