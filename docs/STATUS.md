@@ -21,10 +21,10 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 ## Workstreams
 | Workstream | Owner | Branch | Status |
 | --- | --- | --- | --- |
-| Pebble store | Storage agent | `ws/storage` | not started |
-| Collector + normalization | Collector agent | `ws/collector` | not started |
-| Query engine + HTTP server | Query agent | `ws/query` | not started |
-| Dashboard | Frontend agent | `ws/web` | not started |
+| Pebble store | Storage agent | `ws/storage` | in progress |
+| Collector + normalization | Collector agent | `ws/collector` | in progress |
+| Query engine + HTTP server | Query agent | `ws/query` | in progress |
+| Dashboard | Frontend agent | `ws/web` | in progress |
 | CLI | CLI agent | after query | blocked on query API |
 | Packaging/CI | DevOps agent | after integration | blocked on cmd/chronos flags |
 
@@ -32,6 +32,11 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 | Date | Command | Result |
 | --- | --- | --- |
 | 2026-11-24 | `go test -race ./...` | memstore conformance: pass |
+
+## Constraints from the owner
+- No open-source license (no LICENSE file, no license fields).
+- Commits authored as the repo owner, no AI attribution trailers.
+- Nothing pushed to the remote without explicit approval.
 
 ## Known defects
 None recorded yet.

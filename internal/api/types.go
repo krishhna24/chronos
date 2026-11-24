@@ -103,6 +103,7 @@ type ObjectState struct {
 	Version *Version `json:"version,omitempty"`
 	// Object is the normalized object. Set when Existence is present, or
 	// when unknown and a last known state exists (check Coverage.State).
+	// Never set when the latest record is a delete.
 	Object json.RawMessage `json:"object,omitempty"`
 }
 
