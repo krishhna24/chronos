@@ -149,15 +149,19 @@ func (v *view) Get(ctx context.Context, key model.ObjectKey, at time.Time) (mode
 
 // scanLatest calls fn with the key and value of the latest version at or
 // before at of every object under prefix (a resource or namespace prefix
-// of the version table), in key order. It costs two seeks per object ever
-// seen (within retention), however many versions each has.
-func scanLatest(ctx context.Context, r pebbleReader, prefix []byte, at time.Time, fn func(key, val []byte) error) error {
+// of the version table), in key order, starting at the first object key
+// >= start (nil: the beginning of prefix). It costs two seeks per object
+// ever seen (within retention), however many versions each has.
+func scanLatest(ctx context.Context, r pebbleReader, prefix, start []byte, at time.Time, fn func(key, val []byte) error) error {
 	it, err := r.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
 		return err
 	}
 	n := 0
-	for valid := it.SeekGE(prefix); valid; {
+	if bytes.Compare(start, prefix) < 0 {
+		start = prefix
+	}
+	for valid := it.SeekGE(start); valid; {
 		if n++; n%ctxCheckEvery == 0 {
 			if err := ctx.Err(); err != nil {
 				_ = it.Close()
@@ -193,6 +197,23 @@ func scanLatest(ctx context.Context, r pebbleReader, prefix []byte, at time.Time
 	return closeIter(it)
 }
 
+// listStart returns where a List scan begins: the first key strictly
+// after opts.After (a seek, not a filter), or nil for the beginning.
+// Every version key of a later object sorts at or after prefixEnd of the
+// After object's prefix, and every version of the After object before it.
+func listStart(opts store.ListOptions) []byte {
+	if opts.After == nil {
+		return nil
+	}
+	return prefixEnd(objectPrefix(model.ObjectKey{Resource: opts.Resource, Namespace: opts.After.Namespace, Name: opts.After.Name}))
+}
+
+// afterKey reports whether (ns, name) is strictly after opts.After.
+func afterKey(opts store.ListOptions, ns, name string) bool {
+	a := opts.After
+	return a == nil || ns > a.Namespace || (ns == a.Namespace && name > a.Name)
+}
+
 func listPrefix(opts store.ListOptions) []byte {
 	if opts.Namespace != "" {
 		return versionNamespacePrefix(opts.Resource, opts.Namespace)
@@ -215,7 +236,7 @@ func (v *view) List(ctx context.Context, opts store.ListOptions, fn func(model.R
 
 // listScan is the reference List path: a prefix scan of the version table.
 func (v *view) listScan(ctx context.Context, opts store.ListOptions, fn func(model.Record) error) error {
-	return scanLatest(ctx, v.snap, listPrefix(opts), opts.At, func(key, val []byte) error {
+	return scanLatest(ctx, v.snap, listPrefix(opts), listStart(opts), opts.At, func(key, val []byte) error {
 		rec, err := decodeVersion(key, val)
 		if err != nil {
 			return err

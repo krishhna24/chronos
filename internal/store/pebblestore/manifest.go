@@ -57,7 +57,7 @@ func (s *Store) Snapshot(ctx context.Context) error {
 	for _, res := range resources {
 		byNS := map[string][]manifestEntry{}
 		var order []string
-		err := scanLatest(ctx, snap, versionResourcePrefix(res), at, func(key, val []byte) error {
+		err := scanLatest(ctx, snap, versionResourcePrefix(res), nil, at, func(key, val []byte) error {
 			rec, err := decodeVersion(key, val)
 			if err != nil {
 				return err
@@ -178,6 +178,10 @@ func (v *view) loadManifest(ctx context.Context, opts store.ListOptions) (h *man
 		if opts.Namespace != "" && n.ns != opts.Namespace {
 			continue
 		}
+		// Namespaces before After are skipped without reading their chunk.
+		if opts.After != nil && n.ns < opts.After.Namespace {
+			continue
+		}
 		ck := chunkKey(h.at, opts.Resource, n.ns)
 		val, closer, err := v.snap.Get(ck)
 		if errors.Is(err, pebble.ErrNotFound) {
@@ -196,6 +200,9 @@ func (v *view) loadManifest(ctx context.Context, opts store.ListOptions) (h *man
 			return nil, nil, false, nil
 		}
 		for _, e := range chunk {
+			if !afterKey(opts, n.ns, e.name) {
+				continue
+			}
 			es = append(es, listEntry{ns: n.ns, name: e.name, at: e.at, deleted: e.deleted, fromMan: true})
 		}
 	}
@@ -255,7 +262,8 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 				_ = it.Close()
 				return true, err
 			}
-			if ref.key.Resource != opts.Resource || (opts.Namespace != "" && ref.key.Namespace != opts.Namespace) {
+			if ref.key.Resource != opts.Resource || (opts.Namespace != "" && ref.key.Namespace != opts.Namespace) ||
+				!afterKey(opts, ref.key.Namespace, ref.key.Name) {
 				continue
 			}
 			window[ref.key] = listEntry{ns: ref.key.Namespace, name: ref.key.Name, at: ref.time, deleted: ref.typ == model.ChangeDeleted}

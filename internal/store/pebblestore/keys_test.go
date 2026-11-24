@@ -108,3 +108,19 @@ func TestSealDetectsCorruption(t *testing.T) {
 func newRand(seed uint64) *rand.Rand {
 	return rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)) //nolint:gosec // reproducible test data, not security
 }
+
+func TestListStartSeeksPastAfterKey(t *testing.T) {
+	at := time.Unix(100, 0)
+	after := podKey("ab", "web-0")
+	start := listStart(store.ListOptions{Resource: "v1/pods", After: &after})
+	for _, k := range []model.ObjectKey{after, podKey("ab", "web"), podKey("a-", "z"), podKey("a", "zz")} {
+		if bytes.Compare(versionKey(k, at), start) >= 0 {
+			t.Errorf("%s at or before After but sorts after the seek key", k)
+		}
+	}
+	for _, k := range []model.ObjectKey{podKey("ab", "web-00"), podKey("ab", "web-0\x01"), podKey("b", ""), podKey("b", "a"), podKey("abc", "a")} {
+		if bytes.Compare(versionKey(k, time.Time{}), start) < 0 {
+			t.Errorf("%s after After but sorts before the seek key", k)
+		}
+	}
+}

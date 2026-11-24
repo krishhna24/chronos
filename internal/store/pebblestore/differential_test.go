@@ -43,7 +43,7 @@ func TestDifferential(t *testing.T) {
 
 var (
 	diffResources  = []string{"v1/pods", "apps/v1/deployments", "v1/nodes", "v1/pods2"}
-	diffNamespaces = []string{"", "a", "ab", "prod", "prod-2", "kube-system"}
+	diffNamespaces = []string{"", "a", "a-", "ab", "b", "prod", "prod-2", "kube-system"}
 	diffNames      = []string{"a", "ab", "b", "web-0", "web-00", "x"}
 )
 
@@ -373,7 +373,14 @@ func (h *diffHarness) compareViews(where string, mv, pv store.View) {
 		if h.r.IntN(2) == 0 {
 			opts.Namespace = h.pick(diffNamespaces)
 		}
-		h.compareStreams(where, fmt.Sprintf("List(%+v)", opts),
+		if h.r.IntN(3) == 0 {
+			a := h.randKey()
+			if h.r.IntN(3) == 0 {
+				a.Namespace += "-" // a key that may not exist, between real ones
+			}
+			opts.After = &a
+		}
+		h.compareStreams(where, fmt.Sprintf("List(%+v after=%v)", opts, opts.After),
 			func(fn func(model.Record) error) error { return mv.List(ctx, opts, fn) },
 			func(fn func(model.Record) error) error { return pv.List(ctx, opts, fn) })
 		// The manifest path must agree with the scan path on its own too.
