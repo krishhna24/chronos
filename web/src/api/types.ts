@@ -101,6 +101,9 @@ export interface ListResponse {
   at: Time;
   coverage: Coverage;
   items: ObjectState[];
+  /** Set when more items match: pass it back as `continue` (with the same
+   * other parameters and this response's `at`) to get the next page. */
+  continue?: string;
 }
 
 /** GET /api/v1/diff */

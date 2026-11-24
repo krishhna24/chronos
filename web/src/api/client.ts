@@ -66,6 +66,23 @@ export interface ListParams {
   at?: Time;
   labelSelector?: string;
   includeDeleted?: boolean;
+  /** Page size, 1..5000 (server default 500). */
+  limit?: number;
+  /** Token from the previous page; `at` must then be given explicitly. */
+  continue?: string;
+}
+
+export interface ListAllOptions {
+  /** Stop after this many pages (default 20). */
+  maxPages?: number;
+  signal?: AbortSignal;
+}
+
+/** A listing assembled from one or more pages. */
+export interface PagedList extends ListResponse {
+  pages: number;
+  /** True when maxPages was reached while the server still had more. */
+  capped: boolean;
 }
 
 export interface DiffParams {
@@ -182,7 +199,41 @@ export class Client {
     return this.get('state', { ...p }, signal);
   }
   list(p: ListParams, signal?: AbortSignal): Promise<ListResponse> {
+    if (p.continue && !p.at) {
+      // The server requires it; failing here gives a clearer error.
+      return Promise.reject(new ApiError(0, 'bad_request', 'list: a continue token requires an explicit at'));
+    }
     return this.get('list', { ...p }, signal);
+  }
+
+  /** The page after `prev`, read at prev's own `at` so that the pages of
+   * one listing describe the same instant. */
+  listNext(p: ListParams, prev: ListResponse, signal?: AbortSignal): Promise<ListResponse> {
+    if (!prev.continue) return Promise.reject(new Error('listNext: no continue token'));
+    return this.list({ ...p, at: prev.at, continue: prev.continue }, signal);
+  }
+
+  /**
+   * Follows continue tokens and concatenates the pages, for callers that
+   * need the complete set (e.g. matching owner references). The first page
+   * fixes the instant; later pages reuse its `at` verbatim. Stops after
+   * maxPages and reports `capped` rather than looping without bound.
+   */
+  async listAll(p: ListParams, opts: ListAllOptions = {}): Promise<PagedList> {
+    const maxPages = Math.max(1, opts.maxPages ?? 20);
+    let page = await this.list({ ...p, continue: undefined }, opts.signal);
+    const out: PagedList = { at: page.at, coverage: page.coverage, items: [...page.items], pages: 1, capped: false };
+    while (page.continue) {
+      if (out.pages >= maxPages) {
+        out.capped = true;
+        out.continue = page.continue;
+        break;
+      }
+      page = await this.listNext(p, page, opts.signal);
+      out.items.push(...page.items);
+      out.pages++;
+    }
+    return out;
   }
   diff(p: DiffParams, signal?: AbortSignal): Promise<DiffResponse> {
     return this.get('diff', { ...p }, signal);

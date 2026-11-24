@@ -103,3 +103,70 @@ describe('Client', () => {
     ]);
   });
 });
+
+describe('Client list paging', () => {
+  const page = (items: string[], cont?: string, at = '2026-11-24T14:00:00.123456789Z') =>
+    JSON.stringify({
+      at,
+      coverage: { state: 'observed' },
+      items: items.map((name) => ({ key: { resource: 'v1/pods', namespace: 'p', name }, at, existence: 'present', coverage: { state: 'observed' } })),
+      ...(cont ? { continue: cont } : {}),
+    });
+
+  function pager(pages: string[]) {
+    let i = 0;
+    return vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(pages[i++] ?? '{}', { status: 200 }));
+  }
+
+  it('passes limit and continue through', async () => {
+    const fetch = pager([page([])]);
+    await new Client({ fetch }).list({ resource: 'v1/pods', at: '2026-11-24T14:00:00Z', limit: 50, continue: 'tok/+=' });
+    expect(fetch.mock.calls[0]![0]).toBe('api/v1/list?resource=v1%2Fpods&at=2026-11-24T14%3A00%3A00Z&limit=50&continue=tok%2F%2B%3D');
+  });
+
+  it('refuses a continue token without an explicit at', async () => {
+    const fetch = pager([]);
+    await expect(new Client({ fetch }).list({ resource: 'v1/pods', continue: 'x' })).rejects.toMatchObject({ code: 'bad_request' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('listNext reads at the previous page’s exact at', async () => {
+    const fetch = pager([page(['c'])]);
+    const prev = JSON.parse(page(['a', 'b'], 'T1'));
+    await new Client({ fetch }).listNext({ resource: 'v1/pods' }, prev);
+    const url = new URL(String(fetch.mock.calls[0]![0]), 'http://x/');
+    expect(url.searchParams.get('at')).toBe('2026-11-24T14:00:00.123456789Z');
+    expect(url.searchParams.get('continue')).toBe('T1');
+  });
+
+  it('listAll follows tokens, pins at from the first page and concatenates', async () => {
+    const fetch = pager([page(['a', 'b'], 'T1'), page(['c', 'd'], 'T2'), page(['e'])]);
+    const all = await new Client({ fetch }).listAll({ resource: 'v1/pods', namespace: 'p' });
+    expect(all.items.map((i) => i.key.name)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(all).toMatchObject({ pages: 3, capped: false, at: '2026-11-24T14:00:00.123456789Z' });
+    expect(all.continue).toBeUndefined();
+    const urls = fetch.mock.calls.map((c) => new URL(String(c[0]), 'http://x/').searchParams);
+    expect(urls[0]!.get('at')).toBeNull(); // first page: server's now
+    expect(urls[0]!.get('continue')).toBeNull();
+    expect(urls.slice(1).map((u) => [u.get('at'), u.get('continue'), u.get('namespace')])).toEqual([
+      ['2026-11-24T14:00:00.123456789Z', 'T1', 'p'],
+      ['2026-11-24T14:00:00.123456789Z', 'T2', 'p'],
+    ]);
+  });
+
+  it('listAll stops at maxPages and reports the cap', async () => {
+    const fetch = pager([page(['a'], 'T1'), page(['b'], 'T2'), page(['c'], 'T3')]);
+    const all = await new Client({ fetch }).listAll({ resource: 'v1/pods' }, { maxPages: 2 });
+    expect(all).toMatchObject({ pages: 2, capped: true, continue: 'T2' });
+    expect(all.items.map((i) => i.key.name)).toEqual(['a', 'b']);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('listAll propagates a failing page', async () => {
+    let i = 0;
+    const fetch = vi.fn(async () =>
+      i++ === 0 ? new Response(page(['a'], 'T1')) : new Response('{"code":"unavailable","message":"busy"}', { status: 503 }),
+    );
+    await expect(new Client({ fetch }).listAll({ resource: 'v1/pods' })).rejects.toMatchObject({ status: 503, code: 'unavailable' });
+  });
+});
