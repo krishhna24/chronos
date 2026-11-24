@@ -1,0 +1,10 @@
+exit 0
+--- stdout
+TIME                   TYPE       ORIGIN     UID        RESOURCEVERSION
+2026-11-24T14:00:00Z   Added      baseline   0f1e2d3c   1
+2026-11-24T14:02:00Z   Modified   watch      0f1e2d3c   1
+2026-11-24T14:04:00Z   GAP        -          -          -     until 2026-11-24T14:06:00Z (watch expired): not observing, changes in this period are unknown
+2026-11-24T14:06:00Z   Modified   resync     0f1e2d3c   1
+2026-11-24T14:07:00Z   Deleted    watch      0f1e2d3c   1
+2026-11-24T14:07:30Z   Added      watch      9a8b7c6d   1
+--- stderr

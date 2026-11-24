@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+NAMESPACE   NAME    READY   STATUS              RESTARTS   AGE
+ns          web-1   1/1     Running             0          61m
+other       web-2   0/1     ContainerCreating   0          11m
+--- stderr

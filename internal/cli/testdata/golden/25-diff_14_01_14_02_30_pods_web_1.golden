@@ -1,0 +1,32 @@
+exit 1
+--- stdout
+--- 2026-11-24T14:01:00Z
++++ 2026-11-24T14:02:30Z
+@@ -10,18 +10,22 @@
+   uid: 0f1e2d3c-aaaa-4bbb-8ccc-000000000001
+ spec:
+   containers:
+-  - image: img:v1
++  - image: img:v2
+     name: app
+     resources: {}
+   nodeName: node-a
+ status:
+   containerStatuses:
+-  - image: img:v1
++  - image: img:v2
+     imageID: ""
+-    lastState: {}
++    lastState:
++      terminated:
++        exitCode: 1
++        finishedAt: "2026-11-24T14:01:30Z"
++        startedAt: null
+     name: app
+     ready: true
+-    restartCount: 0
++    restartCount: 1
+     state:
+       running:
+         startedAt: null
+--- stderr

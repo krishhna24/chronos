@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+NAME    READY   STATUS    RESTARTS        AGE
+web-1   1/1     Running   1 (3m30s ago)   65m
+--- stderr
+Warning: Chronos was not observing pods at 14:05:00 (gap since 14:04:00: watch expired); showing last known state, which may be stale.

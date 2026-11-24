@@ -1,0 +1,4 @@
+exit 2
+--- stdout
+--- stderr
+Error from server (NotFound): pods "nope" not found at 14:01:00 or at 14:02:00

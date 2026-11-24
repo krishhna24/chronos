@@ -1,0 +1,4 @@
+exit 1
+--- stdout
+--- stderr
+Error from server (NotFound): pods "db-0" not found at 14:03:30 (deleted at 14:03:00)
