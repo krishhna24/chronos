@@ -223,7 +223,7 @@ td.actions { white-space: nowrap; }
 td.actions > * + * { margin-left: 0.25rem; }
 .overview td.wide, .overview th.wide { min-width: 18rem; width: 40%; }
 .intervals { margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 0.9em; }
-.versions { max-height: 26rem; overflow-y: auto; margin-top: 0.75rem; }
+.versions { max-height: 26rem; overflow: auto; margin-top: 0.75rem; }
 
 /* Coverage bar and timeline segments */
 .seg { position: absolute; top: 0; bottom: 0; }

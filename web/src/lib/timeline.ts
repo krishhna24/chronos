@@ -120,6 +120,14 @@ export function stateAt(
   t: number,
   opts: { horizon?: Time; now?: number } = {},
 ): CoverageState {
+  // An open interval runs up to and including the server's now, but
+  // segments are half-open [start, end), so the instant `now` itself would
+  // fall into the trailing segment and read as a gap while Chronos is
+  // watching. Answer that instant directly.
+  if (opts.now !== undefined && t === opts.now) {
+    const expired = opts.horizon !== undefined && t < toMs(opts.horizon);
+    if (!expired && intervals.some((iv) => !iv.end && toMs(iv.start) <= t)) return 'observed';
+  }
   const segs = coverageSegments(intervals, { start: t - 1, end: t + 1 }, opts);
   // The segment containing t itself (segments are [start, end)).
   return segs.find((s) => s.start <= t && t < s.end)?.state ?? 'unobserved';

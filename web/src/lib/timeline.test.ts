@@ -81,6 +81,17 @@ describe('stateAt', () => {
     expect(stateAt(intervals, T(54), opts)).toBe('gap');
     expect(stateAt(intervals, T(55), opts)).toBe('observed');
   });
+
+  // Regression: against the real server the Overview's "Now" column read
+  // "gap" for every type while Chronos was watching, because the open
+  // interval's segment ended exactly at now (half-open).
+  it('an open interval is observed at exactly now, and not after it', () => {
+    const opts = { horizon: iso(5), now: T(100) };
+    expect(stateAt(intervals, T(100), opts)).toBe('observed');
+    expect(stateAt(intervals, T(101), opts)).toBe('gap');
+    const closed: Interval[] = [{ start: iso(10), end: iso(40) }];
+    expect(stateAt(closed, T(100), opts)).toBe('gap');
+  });
 });
 
 describe('placeMarkers', () => {

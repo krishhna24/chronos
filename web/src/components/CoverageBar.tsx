@@ -8,7 +8,9 @@ export function CoverageBar({ intervals, domain, horizon, now }: { intervals: re
   const span = domain.end - domain.start;
   const observed = segs.filter((s) => s.state === 'observed').reduce((n, s) => n + (s.end - s.start), 0);
   const gaps = segs.filter((s) => s.state === 'gap');
-  const pct = span > 0 ? Math.round((observed / span) * 100) : 0;
+  const ratio = span > 0 ? observed / span : 0;
+  // A short observation in a long window would otherwise read as "0%".
+  const pct = ratio > 0 && ratio < 0.01 ? '<1' : String(Math.round(ratio * 100));
   const summary = `Observed ${pct}% of the window; ${gaps.length} gap${gaps.length === 1 ? '' : 's'}${
     gaps.length ? ` totalling ${formatDuration(gaps.reduce((n, s) => n + s.end - s.start, 0))}` : ''
   }.`;

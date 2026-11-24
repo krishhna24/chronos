@@ -54,12 +54,15 @@ export function ObjectDetail({ state, update }: { state: AppState; update: (p: P
   const cursor = state.at ? toMs(state.at) : now;
 
   const domainFor = (versions: readonly Version[], coverageStart: number | undefined): Domain => {
-    const firstKnown = Math.min(
-      horizon ? toMs(horizon) : Number.POSITIVE_INFINITY,
-      coverageStart ?? Number.POSITIVE_INFINITY,
-      ...versions.map((v) => toMs(v.observedAt)),
-    );
-    const all = { start: Number.isFinite(firstKnown) ? firstKnown : now - 3_600_000, end: now };
+    // "Whole history" spans this object's own records, not the retention
+    // window: with a 7-day horizon and a few minutes of changes, every
+    // marker would otherwise be squeezed against the right edge. Pad 5%
+    // before the first record so it is not drawn on the axis edge.
+    const firstVersion = Math.min(...versions.map((v) => toMs(v.observedAt)));
+    const firstKnown = Number.isFinite(firstVersion) ? firstVersion : (coverageStart ?? now - 3_600_000);
+    const pad = Math.max(60_000, (now - firstKnown) * 0.05);
+    const lowest = horizon ? toMs(horizon) : Number.NEGATIVE_INFINITY;
+    const all = { start: Math.max(lowest, Math.min(firstKnown, now - 60_000) - pad), end: now };
     switch (zoom) {
       case 'all':
         return all;
