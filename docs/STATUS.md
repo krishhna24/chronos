@@ -9,7 +9,7 @@ Updated: 2026-11-24
   `internal/model`, `internal/store` contract, memstore reference store,
   storetest conformance suite, `internal/api` wire types, `docs/api.md`.
 - [ ] Phase 3 — Core implementation (parallel workstreams below)
-- [ ] Phase 4 — Integration (`cmd/chronos`)
+- [ ] Phase 4 — Integration: `cmd/chronos` wired (bd68e72); smoke-tested on kind with memory storage (deployment image diff correct, dashboard served, clean SIGTERM). Pebble wiring pending.
 - [ ] Phase 5 — Adversarial verification
 - [ ] Phase 6 — Rebuild and hardening
 - [ ] Phase 7 — Release readiness
@@ -21,12 +21,12 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 ## Workstreams
 | Workstream | Owner | Branch | Status |
 | --- | --- | --- | --- |
-| Pebble store | Storage agent | `ws/storage` | in progress |
-| Collector + normalization | Collector agent | `ws/collector` | in progress |
+| Pebble store | Storage agent | `ws/storage` | PAUSED mid-work (usage limit); see worktree for uncommitted files |
+| Collector + normalization | Collector agent | `ws/collector` | merged; unit + kind integration tests re-run by orchestrator: pass |
 | Query engine + HTTP server | Query agent | `ws/query` | merged (c7443c2); verified by orchestrator |
 | Dashboard | Frontend agent | `ws/web` | merged (a6c21ed); verified by orchestrator; not yet viewed in a real browser |
-| CLI (`kubectl at`) | CLI agent | `ws/cli` | in progress |
-| Packaging/CI | DevOps agent | after integration | blocked on cmd/chronos flags |
+| CLI (`kubectl at`) | CLI agent | `ws/cli` | PAUSED mid-work (usage limit) |
+| Packaging/CI | DevOps agent | `ws/devops` (empty worktree) | not started; cmd/chronos flags now final |
 
 ## Test results
 | Date | Command | Result |
