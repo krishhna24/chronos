@@ -210,7 +210,10 @@ offset are in the local time zone, or UTC with --utc.
 Chronos is reached through the Kubernetes API server's service proxy using your
 kubeconfig; that needs "get" on services/proxy in the Chronos namespace. Use
 --server (or CHRONOS_SERVER) to connect directly, e.g. through
-"kubectl port-forward -n chronos svc/chronos 8080:http".`,
+"kubectl port-forward -n chronos svc/chronos 8080:http".
+
+kubectl does not accept its own flags before a plugin name, so put flags such
+as --kubeconfig and --context after "at": kubectl at --context prod -5m get pods.`,
 		Example: `  # Pods in the current namespace 20 minutes ago
   kubectl at -20m get pods
 
