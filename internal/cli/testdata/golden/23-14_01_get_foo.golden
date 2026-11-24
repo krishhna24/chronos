@@ -1,0 +1,4 @@
+exit 1
+--- stdout
+--- stderr
+error: the Chronos server doesn't have a resource type "foo" (recorded types: pods, deployments, replicasets, services, configmaps, events, secrets)

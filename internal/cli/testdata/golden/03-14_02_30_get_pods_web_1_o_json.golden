@@ -1,0 +1,52 @@
+exit 0
+--- stdout
+{
+    "kind": "Pod",
+    "apiVersion": "v1",
+    "metadata": {
+        "name": "web-1",
+        "namespace": "ns",
+        "uid": "0f1e2d3c-aaaa-4bbb-8ccc-000000000001",
+        "resourceVersion": "1",
+        "creationTimestamp": "2026-11-24T13:00:00Z",
+        "labels": {
+            "app": "web"
+        }
+    },
+    "spec": {
+        "containers": [
+            {
+                "name": "app",
+                "image": "img:v2",
+                "resources": {}
+            }
+        ],
+        "nodeName": "node-a"
+    },
+    "status": {
+        "phase": "Running",
+        "podIP": "10.0.0.7",
+        "containerStatuses": [
+            {
+                "name": "app",
+                "state": {
+                    "running": {
+                        "startedAt": null
+                    }
+                },
+                "lastState": {
+                    "terminated": {
+                        "exitCode": 1,
+                        "startedAt": null,
+                        "finishedAt": "2026-11-24T14:01:30Z"
+                    }
+                },
+                "ready": true,
+                "restartCount": 1,
+                "image": "img:v2",
+                "imageID": ""
+            }
+        ]
+    }
+}
+--- stderr

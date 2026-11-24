@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+pod/db-0
+pod/web-1
+pod/web-2
+--- stderr

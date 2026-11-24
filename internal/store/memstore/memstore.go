@@ -7,6 +7,7 @@ package memstore
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -181,7 +182,7 @@ func (s *Store) View(ctx context.Context) (store.View, error) {
 		byKey:    make(map[model.ObjectKey][]model.Record, len(s.st.byKey)),
 		coverage: make(map[string][]model.CoverageEvent, len(s.st.coverage)),
 		horizon:  s.st.horizon,
-	}}
+	}, lastRec: maps.Clone(s.lastRec)}
 	for k, rs := range s.st.byKey {
 		v.st.byKey[k] = rs[:len(rs):len(rs)]
 	}
@@ -262,9 +263,10 @@ func (s *Store) Close() error {
 }
 
 type view struct {
-	mu     sync.Mutex
-	st     state
-	closed bool
+	mu      sync.Mutex
+	st      state
+	lastRec map[string]time.Time
+	closed  bool
 }
 
 func (v *view) check(ctx context.Context) error {
@@ -382,6 +384,13 @@ func (v *view) Resources(ctx context.Context) ([]string, error) {
 }
 
 func (v *view) Horizon() time.Time { return v.st.horizon }
+
+func (v *view) LatestRecordTime(ctx context.Context, resource string) (time.Time, error) {
+	if err := v.check(ctx); err != nil {
+		return time.Time{}, err
+	}
+	return v.lastRec[resource], nil
+}
 
 func (v *view) Close() error {
 	v.mu.Lock()

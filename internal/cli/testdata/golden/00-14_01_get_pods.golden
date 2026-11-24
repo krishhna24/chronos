@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+NAME    READY   STATUS    RESTARTS   AGE
+db-0    1/1     Running   0          31m
+web-1   1/1     Running   0          61m
+--- stderr

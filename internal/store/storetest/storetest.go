@@ -393,6 +393,29 @@ func Run(t *testing.T, newStore Factory) {
 		}
 	})
 
+	t.Run("LatestRecordTimeSurvivesCompaction", func(t *testing.T) {
+		s := newStore(t)
+		a := key("ns", "a")
+		del := rec(a, "u", model.ChangeDeleted, t0.Add(2*time.Second), "x")
+		mustWrite(t, s, cov(pods, model.CoverageStart, t0), rec(a, "u", model.ChangeAdded, t0.Add(time.Second), "x"), del)
+		if err := s.Compact(ctx, t0.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		v := view(t, s)
+		lt, err := v.LatestRecordTime(ctx, pods)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !lt.Equal(del.Record.ObservedAt) {
+			t.Errorf("LatestRecordTime = %s, want %s", lt, del.Record.ObservedAt)
+		}
+		if lt, _ := v.LatestRecordTime(ctx, "v1/services"); !lt.IsZero() {
+			t.Errorf("LatestRecordTime of unused resource = %s", lt)
+		}
+		// The bound it reports must be accepted as a crash End.
+		mustWrite(t, s, cov(pods, model.CoverageEnd, lt))
+	})
+
 	t.Run("Heartbeat", func(t *testing.T) {
 		s := newStore(t)
 		if hb, err := s.Heartbeat(ctx); err != nil || !hb.IsZero() {

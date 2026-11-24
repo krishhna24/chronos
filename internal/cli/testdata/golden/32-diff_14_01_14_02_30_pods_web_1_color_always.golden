@@ -1,0 +1,32 @@
+exit 1
+--- stdout
+[1m--- 2026-11-24T14:01:00Z[0m
+[1m+++ 2026-11-24T14:02:30Z[0m
+[36m@@ -10,18 +10,22 @@[0m
+   uid: 0f1e2d3c-aaaa-4bbb-8ccc-000000000001
+ spec:
+   containers:
+[31m-  - image: img:v1[0m
+[32m+  - image: img:v2[0m
+     name: app
+     resources: {}
+   nodeName: node-a
+ status:
+   containerStatuses:
+[31m-  - image: img:v1[0m
+[32m+  - image: img:v2[0m
+     imageID: ""
+[31m-    lastState: {}[0m
+[32m+    lastState:[0m
+[32m+      terminated:[0m
+[32m+        exitCode: 1[0m
+[32m+        finishedAt: "2026-11-24T14:01:30Z"[0m
+[32m+        startedAt: null[0m
+     name: app
+     ready: true
+[31m-    restartCount: 0[0m
+[32m+    restartCount: 1[0m
+     state:
+       running:
+         startedAt: null
+--- stderr

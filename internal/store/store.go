@@ -128,5 +128,11 @@ type View interface {
 	// t >= Horizon. Zero when nothing has been compacted.
 	Horizon() time.Time
 
+	// LatestRecordTime returns the greatest ObservedAt ever assigned to a
+	// record of resource, or the zero time if none. Compaction does not
+	// lower it: it is the bound that CoverageEnd validation uses, so a
+	// writer recovering from a crash can always place a valid End.
+	LatestRecordTime(ctx context.Context, resource string) (time.Time, error)
+
 	Close() error
 }

@@ -112,6 +112,11 @@ type ListResponse struct {
 	At       time.Time     `json:"at"`
 	Coverage Coverage      `json:"coverage"`
 	Items    []ObjectState `json:"items"`
+	// Continue is set when more items match: pass it back as the
+	// `continue` parameter, with the same other parameters, to get the
+	// next page. Pages of one listing are read at the same `at`, so the
+	// concatenation is the same as one unpaged response.
+	Continue string `json:"continue,omitempty"`
 }
 
 // DiffResponse: GET /api/v1/diff
