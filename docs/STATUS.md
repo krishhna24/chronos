@@ -40,6 +40,23 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 - Commits authored as the repo owner, no AI attribution trailers.
 - Nothing pushed to the remote without explicit approval.
 
+## Independent review (2026-11-25) — remediation
+| # | Severity | Finding | Owner | Status |
+| --- | --- | --- | --- | --- |
+| 1 | critical | Shutdown during failed relist claims continuity to shutdown time | collector | fixing |
+| 2 | high | Events dropped at shutdown under backpressure, no gap | collector | fixing |
+| 3 | high | Crash recovery after compaction crash-loops (End < latest record) | contract + collector + storage | contract done (0e31ed1: View.LatestRecordTime); impl in progress |
+| 4 | medium | Clean watch close advances continuity past undelivered events | collector | fixing |
+| 5 | medium | /list unbounded (84 MB body at 10k pods) | contract + query + cli + web | contract done; CLI paging done (dbc4fed); server + web in progress |
+| 6 | medium | ANSI escape injection in CLI tables | cli | fixed (37c505b) |
+| 7 | medium | Shutdown hangs if a store write blocks | collector | fixing |
+| 8 | medium | ObservedAt late by store stalls while coverage says observed | collector | fixing |
+| 9 | low | Live End at last record time makes that record classify as gap | collector | fixing |
+| – | low | Secret annotations other than last-applied survive | collector (normalize) + ADR 0005 | ADR amended; impl in progress |
+| – | low | Watch Delete with different UID loses old-UID delete | collector | fixing |
+| – | low | Overflowing relative time reported as future | cli | fixed (37c505b) |
+| – | low | /readyz ignores collector sync and store health | orchestrator | open: decide |
+
 ## Known defects / follow-ups
 - memstore View copies the key map (~1 ms per View at 10k keys): fine for tests, not for production (pebblestore is the production path).
 - Label-selector List decodes every object (44 ms at 10k on memstore); revisit after pebblestore benchmarks.
