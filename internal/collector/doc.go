@@ -28,6 +28,11 @@
 //
 //	[End(lostAt)]?  [resync Added/Modified/Deleted...]  [Start]
 //
+// Every End is placed strictly after the resource's latest record
+// (resource.endAt): the query engine treats End.At <= T as the End, so an
+// End at exactly the last record's time would turn that observed record
+// into gap.
+//
 // End is present only if coverage is open in the store. It goes first
 // because the store requires End.At >= the resource's latest record time,
 // and the resync records are stamped with the relist time (later than
@@ -39,24 +44,59 @@
 // chunk and Start in the last; a crash between chunks leaves coverage
 // closed, and the next LIST is diffed against whatever was written.
 //
-// lostAt is the last instant the source knows it saw everything: the last
-// watch event or bookmark received, or the moment a stream was closed
-// normally by the server. It is frozen while a LIST is in progress.
+// lostAt is the last instant the source knows it saw everything: the
+// receipt of the last accepted watch event, the last bookmark, or the last
+// applied LIST. It is frozen while a LIST is in progress. A stream that
+// closes without an error does not advance it: the apiserver may drop
+// events buffered for a watcher when it terminates the watch, so only
+// delivered events and bookmarks prove progress. For a quiet resource
+// that costs at most a bookmark interval (~1 min) of coverage when a
+// resume then fails.
 //
 // Watch events become Records with origin=watch, ObservedAt from the
-// injected clock. An update whose normalized hash is unchanged is skipped
-// (debug log). Delete records carry the final state delivered by the
-// watch; for an object-less cache.DeletedFinalStateUnknown, the last
-// stored state.
+// injected clock at receipt. An update whose normalized hash is unchanged
+// is skipped (debug log). Delete records carry the final state delivered
+// by the watch; for an object-less cache.DeletedFinalStateUnknown, the
+// last stored state.
+//
+// UID mismatches on a watch (impossible on a truly continuous watch) are
+// recorded as what must have happened, with the inferred part marked
+// resync: an Added/Modified for a new UID yields Deleted(old UID, last
+// stored state, origin resync) then Added/watch; a Deleted for a UID other
+// than the known one yields only Deleted(known UID, last stored state,
+// origin resync), the never-seen instance is not recorded, and the key is
+// absent afterwards.
 //
 // # Time stamping and heartbeats
 //
-// ObservedAt is assigned when the queue accepts the item, under the queue
-// lock, so queue order equals time order. A heartbeat is itself a queue
-// item; the writer calls store.SetHeartbeat(t) only after every earlier
-// item is durable and only if every resource is synced with a live watch.
-// So after a crash End = max(heartbeat, latest record, latest Start) never
-// claims coverage over an event that was received but not written.
+// ObservedAt is assigned at receipt, in the reflector callback, before it
+// waits for queue space; the source marks itself "waiting" under the same
+// lock. Stamping at acceptance (the earlier design) made every change late
+// by the length of a store stall while coverage still said observed.
+//
+// Receipt stamping alone does not bound the error, because events still
+// unread in the watch stream are stamped only when the blocked reflector
+// gets to them. Hence the stall rule: if an item waits longer than
+// Config.StallTimeout (default 5s) for queue space, the source forces a
+// relist, the item is still recorded (its stamp is accurate), and the
+// writer ends coverage at that item's receipt time (reason "stall"). The
+// changes the reflector had not read yet are re-derived by the relist as
+// resync records inside the gap. So no ObservedAt inside observed coverage
+// is late by more than StallTimeout. Short waits (under StallTimeout) are
+// ordinary batching backpressure and keep coverage.
+//
+// Within a resource, queue order is receipt order (one reflector
+// goroutine). Across resources a waiting item can be overtaken by a
+// later-stamped one; the store's clamping makes such times non-decreasing
+// (by at most the wait, itself bounded by StallTimeout).
+//
+// A heartbeat is a queue item stamped before the sources are checked. It
+// is enqueued only if no source has a received item still waiting and all
+// are synced with a live watch, so every item received before the
+// heartbeat's time is ahead of it in the queue; the writer calls
+// store.SetHeartbeat only after flushing them. After a crash End =
+// max(heartbeat, latest record, latest Start) therefore never claims
+// coverage over a change that was received but not written.
 //
 // # Backpressure and write failures
 //
@@ -64,7 +104,8 @@
 // writer is busy, the queue fills, and the reflector goroutine blocks
 // inside Add/Update/Replace: it stops reading its watch stream, and the
 // API server buffers or eventually drops the watch (which then resumes
-// or relists, both handled). Memory does not grow.
+// or relists, both handled). Memory does not grow. A wait longer than
+// StallTimeout ends coverage (see above).
 //
 // A failing write is retried with exponential backoff for
 // Config.WriteRetryTimeout. After that, the batch is dropped, but not
@@ -79,13 +120,27 @@
 //
 // At startup the latest record of every key is loaded (View.List at a far
 // future time) and its hash recomputed from the stored bytes
-// (normalize.NormalizeJSON). If a resource's latest coverage event is a
-// Start (no clean End: crash), End(max(heartbeat, latest record, latest
-// Start), "crash-recovery") is written before anything else.
+// (normalize.NormalizeJSON). The resource's latest record time comes from
+// View.LatestRecordTime, which compaction never lowers (List no longer
+// shows compacted delete records, and an End before them is rejected).
+// If a resource's latest coverage event is a Start (no clean End: crash),
+// End(max(heartbeat, latest record, latest Start), "crash-recovery") is
+// written before anything else.
 //
-// On context cancellation the reflectors are stopped first, then a
-// shutdown item is queued; the writer flushes everything before it and
-// writes End(now, "shutdown") for every open resource.
+// On context cancellation each source records whether it still had
+// continuity, the reflectors are stopped, and a shutdown item stamped
+// after they stopped is queued; the writer flushes everything before it
+// and writes End("shutdown") for every open resource. The End is at the
+// shutdown time only for a source that was healthy when shutdown began
+// and dropped nothing while stopping; otherwise (watch lost, relist in
+// progress or failing, stalled, or a received item dropped because the
+// queue was full) at the source's continuity bound, lostAt above.
+//
+// The final writes are bounded by Config.ShutdownTimeout. If a store Write
+// ignores cancellation and does not return, Run returns an error after the
+// timeout with the writer goroutine still inside Write; the caller then
+// closes the store, and Store.Close must make that Write return. The next
+// start treats the open coverage as a crash.
 //
 // # Research notes (client-go / apimachinery v0.37.2)
 //
@@ -157,16 +212,18 @@
 //     coverage is open when a Replace is applied, it writes End first.
 //     That covers the first Replace after a restart too (coverage was
 //     closed by shutdown or crash recovery, so no End is needed).
-//   - The gap's start cannot be read from the reflector (no exported
-//     hook for "stream ended"); the proxy in sourceLW records it. ASSUMPTION:
-//     a stream that closes without an error event delivered everything up
-//     to the close (true for the apiserver's timeout close; for a
-//     dropped connection, events in flight at the drop are attributed to
-//     the gap after it, an error bounded by delivery lag).
+//   - The gap's start cannot be read from the reflector (no exported hook
+//     for "stream ended"). The collector does not assume a closed stream
+//     delivered everything up to the close (the review showed the
+//     apiserver may drop a terminated watcher's buffered events); the gap
+//     starts at the last delivered event or bookmark.
 //   - ASSUMPTION: between a successful Watch call and a 410 error event at
 //     the start of that stream (milliseconds) a heartbeat could be
 //     written; a crash in that window would claim that much extra
 //     coverage.
+//   - ASSUMPTION: events the apiserver committed but had not yet sent
+//     when a change was received are attributed by delivery order;
+//     ObservedAt is accurate to delivery lag (ADR 0002).
 //
 // Metadata-only list/watch (k8s.io/client-go/metadata):
 //
@@ -181,8 +238,10 @@
 //     generation, creationTimestamp, deletionTimestamp, labels,
 //     annotations, ownerReferences, finalizers, managedFields).
 //     Annotations can include kubectl's last-applied-configuration with the
-//     full Secret, which normalize strips; managedFields name the data
-//     keys, so normalize always drops them for metadata-only types.
+//     full Secret, or tokens (e.g. openshift.io/token-secret.value), so
+//     normalize keeps only allow-listed annotations on metadata-only types
+//     (default none); managedFields name the data keys, so normalize always
+//     drops them for metadata-only types.
 //   - VERIFIED by the integration test against kind (server v1.37.0):
 //     items of a metadata LIST carry an empty TypeMeta (not v1/Secret), so
 //     normalize always sets apiVersion/kind from the resource type.

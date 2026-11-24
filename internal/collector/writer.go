@@ -28,6 +28,7 @@ const (
 	reasonCrash        = "crash-recovery"
 	reasonShutdown     = "shutdown"
 	reasonWriteFailure = "write-failure"
+	reasonStall        = "stall"
 )
 
 type nsName struct{ ns, name string }
@@ -65,8 +66,33 @@ type resource struct {
 	mu      sync.Mutex
 	covOpen bool // latest coverage event is Start (durable)
 	synced  bool // a LIST has been applied and nothing was lost since
-	lost    bool // a write failed; coverage must end and a relist is pending
+	lost    bool // continuity lost (write failure, stall); End and relist pending
 	lostAt  time.Time
+	// lostReason is the End reason when lostAt bounds the End.
+	lostReason string
+}
+
+// endAt places an End for r at bound, moved forward as the store requires
+// (not before the latest Start) and strictly after the latest record, so
+// that record — which was observed — classifies as observed rather than
+// gap (classification treats End.At <= T as the End).
+func (r *resource) endAt(bound time.Time) time.Time {
+	at := latest(bound, r.lastStartAt)
+	if !at.After(r.lastRecAt) {
+		at = r.lastRecAt.Add(time.Nanosecond)
+	}
+	return at
+}
+
+// markLost records that continuity for r ended at at. The earliest loss
+// wins.
+func (r *resource) markLost(at time.Time, reason string) {
+	r.setState(func() {
+		r.lost, r.synced = true, false
+		if r.lostAt.IsZero() || at.Before(r.lostAt) {
+			r.lostAt, r.lostReason = at, reason
+		}
+	})
 }
 
 func (r *resource) setState(f func()) {
@@ -126,7 +152,7 @@ func (w *writer) recover(ctx context.Context) error {
 			return err
 		}
 		if r.covOpen {
-			at := latest(hb, r.lastRecAt, r.lastStartAt)
+			at := r.endAt(hb)
 			w.log.Warn("coverage left open by an unclean stop; closing it",
 				"resource", r.id, "at", at, "heartbeat", hb)
 			ends = append(ends, coverage(r.id, model.CoverageEnd, at, reasonCrash))
@@ -161,8 +187,14 @@ func (w *writer) loadKnown(ctx context.Context, v store.View, r *resource) error
 	if err != nil {
 		return fmt.Errorf("collector: load state of %s: %w", r.id, err)
 	}
+	// The store's own bound covers records that compaction removed from
+	// List (old deletes); End validation uses it.
+	bound, err := v.LatestRecordTime(ctx, r.id)
+	if err != nil {
+		return fmt.Errorf("collector: latest record time of %s: %w", r.id, err)
+	}
 	r.known = known
-	r.lastRecAt = latest(r.lastRecAt, lastRec)
+	r.lastRecAt = latest(r.lastRecAt, lastRec, bound)
 	return nil
 }
 
@@ -258,12 +290,7 @@ func (w *writer) declareLost(batch []store.Entry, err error) {
 	for r, at := range first {
 		w.log.Error("store write failed; ending coverage and forcing a relist",
 			"resource", r.id, "lostAt", at, "entries", len(batch), "err", err)
-		r.setState(func() {
-			r.lost, r.synced = true, false
-			if r.lostAt.IsZero() || at.Before(r.lostAt) {
-				r.lostAt = at
-			}
-		})
+		r.markLost(at, reasonWriteFailure)
 		r.src.requestRelist()
 	}
 }
@@ -329,6 +356,19 @@ func (w *writer) applyWritten(entries []store.Entry) {
 }
 
 func (w *writer) handleEvent(ctx context.Context, it item) error {
+	if err := w.applyEvent(ctx, it); err != nil {
+		return err
+	}
+	if it.stalled {
+		// The reflector stopped reading its stream when this item was
+		// received; the item itself is recorded, nothing after it is
+		// trusted. The source has already forced the relist.
+		it.res.markLost(it.at, reasonStall)
+	}
+	return nil
+}
+
+func (w *writer) applyEvent(ctx context.Context, it item) error {
 	r := it.res
 	if !r.synced || r.lost {
 		// Coverage is (being) ended and a relist is pending; the LIST will
@@ -345,12 +385,14 @@ func (w *writer) handleEvent(ctx context.Context, it item) error {
 	case model.ChangeAdded, model.ChangeModified:
 		if had && prev.uid != it.obj.UID {
 			// A new instance without a delete in between should not happen
-			// on a continuous watch; record it the way a relist would.
+			// on a continuous watch. The old instance's deletion is
+			// inferred, not delivered, so it is recorded as resync (it
+			// happened at an unknown time before it.at).
 			last, err := w.lastObjects(ctx, r, []nsName{k})
 			if err != nil || r.lost {
 				return err
 			}
-			w.pending = append(w.pending, deleteRecord(r, k, prev, last[k], model.OriginWatch, it.at))
+			w.pending = append(w.pending, deleteRecord(r, k, prev, last[k], model.OriginResync, it.at))
 			delete(r.known, k)
 			had = false
 		}
@@ -369,10 +411,23 @@ func (w *writer) handleEvent(ctx context.Context, it item) error {
 			w.log.Debug("delete of an object not known to be present skipped", "resource", r.id, "namespace", k.ns, "name", k.name)
 			return nil
 		}
-		if it.hasObj {
+		switch {
+		case it.hasObj && it.obj.UID != "" && it.obj.UID != prev.uid:
+			// The deleted instance is not the one known: the known one must
+			// have been deleted earlier (inferred: resync, carrying its last
+			// stored state). The unknown instance was never seen alive and
+			// is not recorded. The key is absent afterwards.
+			w.log.Warn("delete of an unknown instance; recording the known instance as deleted",
+				"resource", r.id, "namespace", k.ns, "name", k.name)
+			last, err := w.lastObjects(ctx, r, []nsName{k})
+			if err != nil || r.lost {
+				return err
+			}
+			w.pending = append(w.pending, deleteRecord(r, k, prev, last[k], model.OriginResync, it.at))
+		case it.hasObj:
 			// The watch delivered the final state (ADR 0003).
 			w.pending = append(w.pending, record(r, it.obj, model.ChangeDeleted, model.OriginWatch, it.at))
-		} else {
+		default:
 			last, err := w.lastObjects(ctx, r, []nsName{k})
 			if err != nil || r.lost {
 				return err
@@ -450,11 +505,10 @@ func (w *writer) handleReplace(ctx context.Context, it item) error {
 	entries := make([]store.Entry, 0, len(keys)+2)
 	if r.covOpen {
 		lostAt, reason := it.lostAt, reasonRelist
-		if !r.lostAt.IsZero() && (lostAt.IsZero() || r.lostAt.Before(lostAt)) {
-			lostAt, reason = r.lostAt, reasonWriteFailure
+		if !r.lostAt.IsZero() && (lostAt.IsZero() || !r.lostAt.After(lostAt)) {
+			lostAt, reason = r.lostAt, r.lostReason
 		}
-		lostAt = latest(lostAt, r.lastRecAt, r.lastStartAt)
-		entries = append(entries, coverage(r.id, model.CoverageEnd, lostAt, reason))
+		entries = append(entries, coverage(r.id, model.CoverageEnd, r.endAt(lostAt), reason))
 	}
 	var added, modified, deleted int
 	known := make(map[nsName]objState, len(listed))
@@ -491,7 +545,7 @@ func (w *writer) handleReplace(ctx context.Context, it item) error {
 		}
 	}
 	r.known = known
-	r.setState(func() { r.synced, r.lost, r.lostAt = true, false, time.Time{} })
+	r.setState(func() { r.synced, r.lost, r.lostAt, r.lostReason = true, false, time.Time{}, "" })
 	r.src.relistDone()
 	w.log.Info("list applied", "resource", r.id, "origin", origin.String(), "objects", len(listed),
 		"added", added, "modified", modified, "deleted", deleted, "coverageEnded", len(entries) > 0 && entries[0].Coverage != nil)
@@ -500,12 +554,11 @@ func (w *writer) handleReplace(ctx context.Context, it item) error {
 
 func (w *writer) replaceFailed(r *resource, err error) error {
 	w.log.Error("cannot apply list; forcing another relist", "resource", r.id, "err", err)
-	r.setState(func() {
-		r.lost, r.synced = true, false
-		if r.lostAt.IsZero() {
-			r.lostAt = latest(r.lastRecAt, r.lastStartAt)
-		}
-	})
+	if r.lostAt.IsZero() {
+		r.markLost(latest(r.lastRecAt, r.lastStartAt), reasonWriteFailure)
+	} else {
+		r.markLost(r.lostAt, r.lostReason)
+	}
 	r.src.requestRelist()
 	return nil
 }
@@ -571,11 +624,17 @@ func (w *writer) handleShutdown(ctx context.Context, it item) error {
 	var ends []store.Entry
 	for _, r := range w.ordered {
 		if r.covOpen {
-			at := latest(it.at, r.lastRecAt, r.lastStartAt)
-			if r.lost && !r.lostAt.IsZero() {
-				at = latest(r.lostAt, r.lastRecAt, r.lastStartAt)
+			// Continuity holds until the reflector stopped (it.at) only if
+			// the source was healthy then and dropped nothing; otherwise
+			// until the last instant it knows it saw everything.
+			bound := it.at
+			if b, useBound := r.src.shutdownBound(); useBound {
+				bound = b
 			}
-			ends = append(ends, coverage(r.id, model.CoverageEnd, at, reasonShutdown))
+			if r.lost && !r.lostAt.IsZero() && r.lostAt.Before(bound) {
+				bound = r.lostAt
+			}
+			ends = append(ends, coverage(r.id, model.CoverageEnd, r.endAt(bound), reasonShutdown))
 		}
 	}
 	if len(ends) == 0 {

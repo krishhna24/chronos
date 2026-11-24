@@ -23,19 +23,23 @@ import (
 // roles for the same cache.Reflector:
 //
 //   - sourceLW wraps the real ListerWatcher. Every watch stream is passed
-//     through a proxy so the source knows when a stream ended cleanly
-//     (continuity held until then) and can force a relist by closing the
-//     stream and failing the next Watch call with 410 Expired.
+//     through a proxy so the source knows whether a stream is live and can
+//     force a relist by closing the stream and failing the next Watch call
+//     with 410 Expired.
 //   - sourceStore is the reflector's store. It normalizes objects and puts
 //     them on the writer queue; it never returns errors for Add/Update/
 //     Delete, because the reflector only logs those (handleAnyWatch) and
 //     the event would be lost silently.
 //
 // contUntil is the latest instant up to which the source knows it saw
-// every change: advanced by watch events and bookmarks received while
-// live, and by the clean end of a stream. It is frozen between the start
-// of a LIST (or streaming list) and the Replace that applies it, and its
-// value at Replace time is the End.At of the gap that the relist closes.
+// every change: the receipt time of the last accepted watch event, the
+// last bookmark, or the last applied LIST. A stream that merely closes
+// does not advance it: the apiserver may drop events buffered for a
+// watcher when it terminates the watch, so only delivered events prove
+// progress. It is frozen between the start of a LIST (or streaming list)
+// and the Replace that applies it; its value at Replace time is the
+// End.At of the gap the relist closes, and when the source is not healthy
+// at shutdown it bounds the shutdown End.
 type source struct {
 	res   *resource
 	inner cache.ListerWatcherWithContext
@@ -43,7 +47,8 @@ type source struct {
 	// WatchList decision is the one it would have made without us.
 	unsupportedWatchList bool
 	q                    *queue
-	clock                clock.PassiveClock
+	clock                clock.Clock
+	stallTimeout         time.Duration
 	norm                 normalize.Options
 	log                  *slog.Logger
 
@@ -57,15 +62,20 @@ type source struct {
 	relist          bool // forced relist requested by the writer
 	cur             *proxy
 	lastEventAt     time.Time
+	waiting         bool // an item is stamped but not yet accepted by the queue
+	stalled         bool // an item waited > stallTimeout; cleared by relistDone
+	dropped         bool // an item was received but never accepted (shutdown)
+	healthyAtStop   bool
 }
 
-func newSource(res *resource, lw cache.ListerWatcher, q *queue, c clock.PassiveClock, norm normalize.Options, log *slog.Logger) *source {
+func newSource(res *resource, lw cache.ListerWatcher, q *queue, c clock.Clock, stall time.Duration, norm normalize.Options, log *slog.Logger) *source {
 	return &source{
 		res:                  res,
 		inner:                cache.ToListerWatcherWithContext(lw),
 		unsupportedWatchList: watchlist.DoesClientNotSupportWatchListSemantics(lw),
 		q:                    q,
 		clock:                c,
+		stallTimeout:         stall,
 		norm:                 norm,
 		log:                  log,
 	}
@@ -73,11 +83,36 @@ func newSource(res *resource, lw cache.ListerWatcher, q *queue, c clock.PassiveC
 
 func (s *source) rt() model.ResourceType { return s.res.rt.ResourceType }
 
-// healthy reports whether the source is synced and has a live watch.
+// healthy reports whether the source is synced, has a live watch, and has
+// no received item still waiting for queue space.
 func (s *source) healthy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.replaced && s.live && !s.awaitingReplace && !s.relist
+	return s.healthyLocked() && !s.waiting
+}
+
+func (s *source) healthyLocked() bool {
+	return s.replaced && s.live && !s.awaitingReplace && !s.relist && !s.stalled && !s.dropped
+}
+
+// stopping is called by Run just before the reflectors are stopped. It
+// records whether continuity held at that moment.
+func (s *source) stopping() {
+	s.mu.Lock()
+	s.healthyAtStop = s.healthyLocked()
+	s.mu.Unlock()
+}
+
+// shutdownBound reports whether the shutdown End must be bounded by
+// contUntil instead of the shutdown time, and returns that bound. That is
+// the case when the source was not healthy when shutdown began (watch
+// lost, relist in progress or failing, stalled), or when it dropped a
+// received item during shutdown (its change is in no record, so coverage
+// must not include it).
+func (s *source) shutdownBound() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.contUntil, !s.healthyAtStop || s.dropped
 }
 
 func (s *source) lastEvent() time.Time {
@@ -111,38 +146,54 @@ func (s *source) requestRelist() {
 func (s *source) relistDone() {
 	s.mu.Lock()
 	s.relist = false
+	s.stalled = false
 	s.mu.Unlock()
 }
 
-func (s *source) streamEnded(p *proxy, clean bool) {
+func (s *source) streamEnded(p *proxy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cur == p {
 		s.cur = nil
 		s.live = false
 	}
-	if clean {
-		// The server closed the stream (normally its timeout). Everything
-		// up to now was delivered; if the reflector can resume from its
-		// resourceVersion the server replays the rest, otherwise this is
-		// where the gap starts.
-		s.advance(s.clock.Now())
-	}
 }
 
-func (s *source) enqueue(it item) {
+// enqueue stamps it with the receipt time and waits for queue space. The
+// stamp is taken under s.mu together with setting waiting, which is what
+// the heartbeat relies on (see Collector.heartbeats).
+func (s *source) enqueue(it item, stallable bool) bool {
 	it.res = s.res
-	at, err := s.q.put(s.ctx, it)
-	if err != nil {
-		// Only at shutdown: the End written then is not later than any
-		// accepted item, and this item was never accepted.
-		s.log.Debug("event dropped at shutdown", "resource", s.res.id)
-		return
-	}
 	s.mu.Lock()
-	s.lastEventAt = at
-	s.advance(at)
+	it.at = s.clock.Now()
+	s.waiting = true
 	s.mu.Unlock()
+	var stall time.Duration
+	if stallable {
+		stall = s.stallTimeout
+	}
+	err := s.q.put(s.ctx, it, s.clock, stall, func() {
+		s.log.Warn("writer queue full for too long; ending coverage and relisting",
+			"resource", s.res.id, "waitingSince", it.at, "stallTimeout", s.stallTimeout)
+		s.mu.Lock()
+		s.stalled = true
+		s.mu.Unlock()
+		s.requestRelist()
+	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.waiting = false
+	if err != nil {
+		// Only at shutdown. Recorded so the shutdown End does not cover it.
+		s.dropped = true
+		s.log.Debug("received item dropped at shutdown", "resource", s.res.id)
+		return false
+	}
+	if it.kind == itemEvent {
+		s.lastEventAt = it.at
+	}
+	s.advance(it.at)
+	return true
 }
 
 func (s *source) normalize(obj any) (normalize.Result, bool) {
@@ -233,7 +284,7 @@ func (l sourceLW) WatchWithContext(ctx context.Context, opts metav1.ListOptions)
 	return p, nil
 }
 
-// proxy forwards a watch stream and reports how it ended.
+// proxy forwards a watch stream and reports when it ended.
 type proxy struct {
 	s    *source
 	in   watch.Interface
@@ -252,10 +303,9 @@ func (p *proxy) Stop() {
 }
 
 func (p *proxy) run() {
-	clean, errored := false, false
 	defer func() {
 		// Record the end before the reflector can observe it.
-		p.s.streamEnded(p, clean && !errored)
+		p.s.streamEnded(p)
 		close(p.out)
 	}()
 	for {
@@ -264,15 +314,7 @@ func (p *proxy) run() {
 			return
 		case ev, ok := <-p.in.ResultChan():
 			if !ok {
-				select {
-				case <-p.stop: // closed because we (or the reflector) stopped it
-				default:
-					clean = true
-				}
 				return
-			}
-			if ev.Type == watch.Error {
-				errored = true
 			}
 			select {
 			case p.out <- ev:
@@ -312,7 +354,7 @@ func (st sourceStore) Delete(obj any) error {
 			if !s.rt().Namespaced {
 				ns = ""
 			}
-			s.enqueue(item{kind: itemEvent, change: model.ChangeDeleted, tomb: nsName{ns, name}})
+			s.enqueue(item{kind: itemEvent, change: model.ChangeDeleted, tomb: nsName{ns, name}}, true)
 			return nil
 		}
 	}
@@ -325,7 +367,7 @@ func (st sourceStore) event(change model.ChangeType, obj any) {
 	if !ok {
 		return
 	}
-	st.s.enqueue(item{kind: itemEvent, change: change, obj: r, hasObj: true})
+	st.s.enqueue(item{kind: itemEvent, change: change, obj: r, hasObj: true}, true)
 }
 
 func (st sourceStore) Replace(list []any, _ string) error {
@@ -342,13 +384,11 @@ func (st sourceStore) Replace(list []any, _ string) error {
 	s.replaced = true
 	s.mu.Unlock()
 
-	at, err := s.q.put(s.ctx, item{kind: itemReplace, res: s.res, list: results, lostAt: lostAt})
-	if err != nil {
-		return err // shutting down; the reflector is exiting anyway
+	// A LIST is a snapshot, not a stream: waiting for space loses nothing,
+	// so it is not subject to the stall rule.
+	if !s.enqueue(item{kind: itemReplace, list: results, lostAt: lostAt}, false) {
+		return s.ctx.Err() // shutting down; the reflector is exiting anyway
 	}
-	s.mu.Lock()
-	s.advance(at)
-	s.mu.Unlock()
 	return nil
 }
 

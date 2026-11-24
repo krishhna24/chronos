@@ -25,8 +25,12 @@ const (
 type item struct {
 	kind itemKind
 	res  *resource
-	// at is stamped by the queue when the item is accepted (see queue.put).
+	// at is when the item was received (stamped by the producer before it
+	// waits for queue space).
 	at time.Time
+	// stalled: the item waited longer than Config.StallTimeout for space;
+	// the reflector stopped reading its stream at at.
+	stalled bool
 
 	// itemEvent
 	change model.ChangeType
@@ -47,13 +51,12 @@ type item struct {
 // in turn stops the reflector from reading its watch stream: backpressure
 // reaches the API server connection instead of growing memory.
 //
-// Timestamps are assigned under the queue lock at the moment an item is
-// accepted, so queue order and time order agree. That makes "every item
-// stamped before t has been written" true once the writer has processed
-// the heartbeat item stamped t, which is what makes a heartbeat safe to
-// use as a crash bound.
+// Items arrive already stamped (at receipt, by the producer). Within one
+// resource the queue order is the stamp order (one reflector goroutine
+// per resource). Across resources an item that waited for space can be
+// overtaken by a later-stamped one; the store's clamping absorbs that, and
+// the heartbeat rule (see Collector.heartbeats) does not depend on it.
 type queue struct {
-	clock  clock.PassiveClock
 	slots  chan struct{} // one token per queued item
 	notify chan struct{} // capacity 1: "items available"
 
@@ -61,23 +64,42 @@ type queue struct {
 	items []item
 }
 
-func newQueue(size int, c clock.PassiveClock) *queue {
+func newQueue(size int) *queue {
 	return &queue{
-		clock:  c,
 		slots:  make(chan struct{}, size),
 		notify: make(chan struct{}, 1),
 	}
 }
 
-// put blocks until there is room or ctx is done, then stamps and enqueues
-// it. It returns the assigned time.
-func (q *queue) put(ctx context.Context, it item) (time.Time, error) {
+// put blocks until there is room or ctx is done, then enqueues it. If
+// stall > 0 and the wait exceeds it, onStall is called once (while still
+// waiting) and the item is marked stalled.
+func (q *queue) put(ctx context.Context, it item, c clock.Clock, stall time.Duration, onStall func()) error {
 	select {
 	case q.slots <- struct{}{}:
-	case <-ctx.Done():
-		return time.Time{}, ctx.Err()
+		q.append(it)
+		return nil
+	default:
 	}
-	return q.append(it), nil
+	var stallC <-chan time.Time
+	if stall > 0 {
+		t := c.NewTimer(stall)
+		defer t.Stop()
+		stallC = t.C()
+	}
+	for {
+		select {
+		case q.slots <- struct{}{}:
+			q.append(it)
+			return nil
+		case <-stallC:
+			stallC = nil
+			it.stalled = true
+			onStall()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // tryPut enqueues it only if there is room right now.
@@ -91,16 +113,14 @@ func (q *queue) tryPut(it item) bool {
 	return true
 }
 
-func (q *queue) append(it item) time.Time {
+func (q *queue) append(it item) {
 	q.mu.Lock()
-	it.at = q.clock.Now()
 	q.items = append(q.items, it)
 	q.mu.Unlock()
 	select {
 	case q.notify <- struct{}{}:
 	default:
 	}
-	return it.at
 }
 
 // take removes up to maxItems items. If none are queued and block is
