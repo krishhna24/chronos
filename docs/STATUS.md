@@ -21,12 +21,12 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 ## Workstreams
 | Workstream | Owner | Branch | Status |
 | --- | --- | --- | --- |
-| Pebble store | Storage agent | `ws/storage` | PAUSED mid-work (usage limit); see worktree for uncommitted files |
+| Pebble store | Storage agent | `ws/storage` | in progress (resumed): benchmarks + Write poisoning |
 | Collector + normalization | Collector agent | `ws/collector` | merged; unit + kind integration tests re-run by orchestrator: pass |
 | Query engine + HTTP server | Query agent | `ws/query` | merged (c7443c2); verified by orchestrator |
 | Dashboard | Frontend agent | `ws/web` | merged (a6c21ed); verified by orchestrator; not yet viewed in a real browser |
-| CLI (`kubectl at`) | CLI agent | `ws/cli` | PAUSED mid-work (usage limit) |
-| Packaging/CI | DevOps agent | `ws/devops` (empty worktree) | not started; cmd/chronos flags now final |
+| CLI (`kubectl at`) | CLI agent, finished by orchestrator | `ws/cli` | merged (58403cd); 38 golden cases + proxy/RBAC-error tests pass; live-tested on kind |
+| Packaging/CI | DevOps agent | `ws/devops` | in progress |
 
 ## Test results
 | Date | Command | Result |
