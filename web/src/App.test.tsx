@@ -85,6 +85,9 @@ describe('App in mock mode', () => {
     const tree = await screen.findByRole('list', { name: 'Ownership tree' });
     expect(within(tree).getByRole('link', { name: 'worker-7f6e5d4c3' })).toBeTruthy();
     expect(within(tree).queryByRole('link', { name: 'worker-5c8d9b6f7' })).toBeNull();
+    // Six prod pods exist then and mock pages hold five: worker's pods sort
+    // last, so they are only present if every page was fetched.
+    expect(within(tree).getAllByRole('link', { name: /^worker-7f6e5d4c3-/ }).length).toBe(2);
   });
 
   it('browser loads further pages with Load more', async () => {

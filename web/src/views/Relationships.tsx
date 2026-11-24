@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type FormEvent } from 'react';
-import { client } from '../api/client';
-import type { ListResponse, ObjectState, Resource } from '../api/types';
+import { client, type PagedList } from '../api/client';
+import type { ObjectState, Resource } from '../api/types';
 import { CoverageBadge, Empty, ErrorBox, ExistenceBadge, Loading } from '../components/common';
 import { CoverageBanner } from '../components/CoverageBanner';
 import { Link } from '../components/Link';
@@ -15,10 +15,14 @@ const DEPLOY = 'apps/v1/deployments';
 const RS = 'apps/v1/replicasets';
 const POD = 'v1/pods';
 
+/** Owner matching needs complete lists, so every page is fetched, up to
+ * this many per resource type. */
+export const MAX_PAGES = 20;
+
 interface Snapshot {
   deployment: ObjectState;
-  replicaSets: ListResponse;
-  pods: ListResponse;
+  replicaSets: PagedList;
+  pods: PagedList;
 }
 
 export function Relationships({ state, update }: { state: AppState; update: (p: Partial<AppState>, o?: { replace?: boolean }) => void }) {
@@ -36,8 +40,8 @@ export function Relationships({ state, update }: { state: AppState; update: (p: 
     const at = state.at ?? new Date(serverNow()).toISOString();
     const [deployment, replicaSets, pods] = await Promise.all([
       client.state({ resource: DEPLOY, namespace: state.namespace, name: state.name!, at }, signal),
-      client.list({ resource: RS, namespace: state.namespace, at }, signal),
-      client.list({ resource: POD, namespace: state.namespace, at }, signal),
+      client.listAll({ resource: RS, namespace: state.namespace, at }, { maxPages: MAX_PAGES, signal }),
+      client.listAll({ resource: POD, namespace: state.namespace, at }, { maxPages: MAX_PAGES, signal }),
     ]);
     return { deployment, replicaSets, pods };
   }, ready ? JSON.stringify([state.namespace, state.name, state.at]) : null);
@@ -102,6 +106,19 @@ function Tree({ snap, horizon, rsType, podType, at }: { snap: Snapshot; horizon?
       <CoverageBanner coverage={d.coverage} subject="Deployments" horizon={horizon} />
       <CoverageBanner coverage={snap.replicaSets.coverage} subject="ReplicaSets" horizon={horizon} />
       <CoverageBanner coverage={snap.pods.coverage} subject="Pods" horizon={horizon} />
+      {([['ReplicaSets', snap.replicaSets], ['Pods', snap.pods]] as const)
+        .filter(([, l]) => l.capped)
+        .map(([what, l]) => (
+          <section key={what} className="banner banner-gap" role="status" aria-label={`${what} list incomplete`}>
+            <p className="banner-title">
+              <span aria-hidden="true">⚠ </span>Only the first {l.pages} pages of {what} were loaded — the tree may be incomplete
+            </p>
+            <p className="banner-detail">
+              {l.items.length} {what} were loaded and the server has more. {what === 'Pods' ? 'Pods' : 'ReplicaSets and their Pods'} beyond
+              that limit are not shown.
+            </p>
+          </section>
+        ))}
     </>
   );
   if (!d.object) {
