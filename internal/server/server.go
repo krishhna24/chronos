@@ -19,9 +19,14 @@ import (
 	"github.com/krishhna24/chronos/internal/store"
 )
 
-// DefaultRequestTimeout bounds the time an API request may spend in the
-// engine.
-const DefaultRequestTimeout = 30 * time.Second
+const (
+	// DefaultRequestTimeout bounds the time an API request may spend in the
+	// engine.
+	DefaultRequestTimeout = 30 * time.Second
+	// DefaultMaxHeavyRequests bounds concurrent /list, /history, /changes
+	// and /diff requests.
+	DefaultMaxHeavyRequests = 8
+)
 
 // Options configures the handler returned by New.
 type Options struct {
@@ -38,6 +43,11 @@ type Options struct {
 	Logger *slog.Logger
 	// RequestTimeout bounds each API request (default DefaultRequestTimeout).
 	RequestTimeout time.Duration
+	// MaxHeavyRequests bounds concurrent requests to the endpoints whose
+	// cost grows with the data (/list, /history, /changes, /diff). Excess
+	// requests get 503 with Retry-After immediately rather than queueing.
+	// 0 means DefaultMaxHeavyRequests; negative disables the bound.
+	MaxHeavyRequests int
 }
 
 type server struct {
@@ -45,6 +55,7 @@ type server struct {
 	readiness func() error
 	log       *slog.Logger
 	timeout   time.Duration
+	heavy     chan struct{} // semaphore; nil: unbounded
 }
 
 // New returns the HTTP handler for the API, health endpoints and optional
@@ -60,6 +71,12 @@ func New(o Options) http.Handler {
 	if s.timeout <= 0 {
 		s.timeout = DefaultRequestTimeout
 	}
+	switch n := o.MaxHeavyRequests; {
+	case n == 0:
+		s.heavy = make(chan struct{}, DefaultMaxHeavyRequests)
+	case n > 0:
+		s.heavy = make(chan struct{}, n)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", getOnly(s.healthz))
@@ -71,13 +88,17 @@ func New(o Options) http.Handler {
 	for path, h := range map[string]apiFunc{
 		"/api/v1/resources": s.resources,
 		"/api/v1/state":     s.state,
-		"/api/v1/list":      s.list,
-		"/api/v1/diff":      s.diff,
-		"/api/v1/history":   s.history,
-		"/api/v1/changes":   s.changes,
 		"/api/v1/object":    s.object,
 	} {
 		mux.HandleFunc(path, getOnly(s.api(h)))
+	}
+	for path, h := range map[string]apiFunc{
+		"/api/v1/list":    s.list,
+		"/api/v1/diff":    s.diff,
+		"/api/v1/history": s.history,
+		"/api/v1/changes": s.changes,
+	} {
+		mux.HandleFunc(path, getOnly(s.bounded(s.api(h))))
 	}
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "unknown API route "+r.URL.Path)
@@ -138,6 +159,27 @@ func (s *server) api(h apiFunc) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, body)
+	}
+}
+
+// bounded admits next only while a heavy-request slot is free, and holds
+// the slot until the response (including JSON encoding) is written. It
+// never waits: a queue would hold memory and connections for requests that
+// are likely to time out anyway, and clients can retry.
+func (s *server) bounded(next http.HandlerFunc) http.HandlerFunc {
+	if s.heavy == nil {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.heavy <- struct{}{}:
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "server busy; retry later")
+			return
+		}
+		defer func() { <-s.heavy }()
+		next(w, r)
 	}
 }
 

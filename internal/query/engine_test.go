@@ -432,7 +432,7 @@ func TestList(t *testing.T) {
 			var got api.ListResponse
 			var err error
 			f.oneView(t, func() {
-				got, err = f.engine.List(ctx, pods, tc.namespace, tc.at, tc.selector, tc.includeDeleted)
+				got, err = f.engine.List(ctx, ListRequest{Resource: pods, Namespace: tc.namespace, At: tc.at, LabelSelector: tc.selector, IncludeDeleted: tc.includeDeleted})
 			})
 			if err != nil {
 				t.Fatalf("List: %v", err)
@@ -463,10 +463,16 @@ func TestListValidation(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	for name, call := range map[string]func() error{
-		"unknown resource": func() error { _, err := f.engine.List(ctx, "v1/nope", "", at(50), "", false); return err },
-		"bad selector":     func() error { _, err := f.engine.List(ctx, pods, "", at(50), "app in (", false); return err },
-		"future":           func() error { _, err := f.engine.List(ctx, pods, "", at(200), "", false); return err },
-		"bad namespace":    func() error { _, err := f.engine.List(ctx, pods, "a/b", at(50), "", false); return err },
+		"unknown resource": func() error { _, err := f.engine.List(ctx, ListRequest{Resource: "v1/nope", At: at(50)}); return err },
+		"bad selector": func() error {
+			_, err := f.engine.List(ctx, ListRequest{Resource: pods, At: at(50), LabelSelector: "app in ("})
+			return err
+		},
+		"future": func() error { _, err := f.engine.List(ctx, ListRequest{Resource: pods, At: at(200)}); return err },
+		"bad namespace": func() error {
+			_, err := f.engine.List(ctx, ListRequest{Resource: pods, Namespace: "a/b", At: at(50)})
+			return err
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := call(); !errors.Is(err, ErrInvalidArgument) {

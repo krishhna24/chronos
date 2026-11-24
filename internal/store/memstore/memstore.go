@@ -300,9 +300,13 @@ func (v *view) List(ctx context.Context, opts store.ListOptions, fn func(model.R
 	}
 	var keys []model.ObjectKey
 	for k := range v.st.byKey {
-		if k.Resource == opts.Resource && (opts.Namespace == "" || k.Namespace == opts.Namespace) {
-			keys = append(keys, k)
+		if k.Resource != opts.Resource || (opts.Namespace != "" && k.Namespace != opts.Namespace) {
+			continue
 		}
+		if a := opts.After; a != nil && (k.Namespace < a.Namespace || (k.Namespace == a.Namespace && k.Name <= a.Name)) {
+			continue
+		}
+		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].Namespace != keys[j].Namespace {

@@ -13,7 +13,10 @@ export function ObjectView({ state, resource, record }: { state: ObjectState; re
 
   let explanation: string;
   if (record && v) {
-    explanation = v.type === 'Deleted' ? 'This record is a deletion; the object shown is the last state Chronos knew before it was deleted.' : 'The object exactly as recorded by this version.';
+    explanation =
+      v.type === 'Deleted'
+        ? 'This record is a deletion, so it carries no object. Inspect the previous version for the last state Chronos saw.'
+        : 'The object exactly as recorded by this version.';
   } else if (state.existence === 'present') {
     explanation = 'The object as it was at this time.';
   } else if (state.existence === 'absent') {

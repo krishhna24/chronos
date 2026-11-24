@@ -1,0 +1,11 @@
+# Keep the build context to what the Dockerfile copies.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!web/
+web/node_modules/
+web/dist/
+**/*_test.go
+**/testdata/

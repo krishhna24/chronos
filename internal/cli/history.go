@@ -117,9 +117,9 @@ func (a *app) runHistory(ctx context.Context, args []string, since, until, outpu
 	}
 	var rows []row
 	for _, v := range h.Versions {
-		rows = append(rows, row{t: v.ObservedAt, cells: strings.Join([]string{
+		rows = append(rows, row{t: v.ObservedAt, cells: strings.Join(safeCells([]string{
 			tf.full(v.ObservedAt), v.Type, v.Origin, shortUID(v.UID), orNone(v.ResourceVersion),
-		}, "\t")})
+		}), "\t")})
 	}
 	gapRow := func(start time.Time, end *time.Time, reason string) row {
 		desc := "until now"
@@ -130,7 +130,7 @@ func (a *app) runHistory(ctx context.Context, args []string, since, until, outpu
 			desc = "until " + tf.full(*end)
 		}
 		if reason != "" {
-			desc += " (" + reason + ")"
+			desc += " (" + safeCell(reason) + ")"
 		}
 		desc += ": not observing, changes in this period are unknown"
 		return row{t: start, gap: true, cells: tf.full(start) + "\tGAP\t-\t-\t-\t" + desc}
@@ -235,8 +235,8 @@ func (a *app) printResources(rs *api.ResourcesResponse) error {
 		if cov == "" {
 			cov = "never observed"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\n", r.Resource, strings.Join(r.ShortNames, ","),
-			apiVersion, r.Namespaced, r.Kind, recorded, cov)
+		_, _ = fmt.Fprintln(tw, strings.Join(safeCells([]string{r.Resource, strings.Join(r.ShortNames, ","),
+			apiVersion, fmt.Sprint(r.Namespaced), r.Kind, recorded, cov}), "\t"))
 	}
 	if err := tw.Flush(); err != nil {
 		return err

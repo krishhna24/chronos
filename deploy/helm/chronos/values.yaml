@@ -1,0 +1,162 @@
+# Default values for the chronos chart.
+#
+# Chronos is a single process with an embedded single-writer store, so the
+# chart always runs exactly one replica; there is deliberately no
+# replicaCount value.
+
+image:
+  repository: ghcr.io/krishhna24/chronos
+  # Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The default release (`helm install chronos ... -n chronos`) yields
+# resources named "chronos", which is the Service name `kubectl at`
+# assumes. Set fullnameOverride to pin the name for other release names.
+nameOverride: ""
+fullnameOverride: ""
+
+# Server configuration. Every key maps to one chronos flag; see
+# docs/install.md for the full table.
+config:
+  # --storage: pebble (durable, on the data volume) or memory (development
+  # only; all history is lost when the pod restarts).
+  storage: pebble
+  # --retention: how long history is kept (minimum 1h).
+  retention: 168h
+  # --retention-interval: how often retention compaction runs.
+  retentionInterval: 10m
+  # --resources: resource types to record. Empty records all supported
+  # types (pods, deployments, replicasets, services, configmaps, events,
+  # secrets). Names, short names and canonical IDs are accepted.
+  resources: []
+  # --redact-annotations: annotation keys removed from every object before
+  # it is stored. kubectl.kubernetes.io/last-applied-configuration is always
+  # removed from Secrets regardless of this list.
+  redactAnnotations: []
+  # --keep-managed-fields: store metadata.managedFields (large).
+  keepManagedFields: false
+  # --log-level: debug, info, warn or error.
+  logLevel: info
+  # --log-format: json or text.
+  logFormat: json
+  # --kube-api-qps / --kube-api-burst: client-side rate limits.
+  kubeApiQPS: 20
+  kubeApiBurst: 40
+
+# Extra command-line arguments appended after the generated ones.
+extraArgs: []
+# Extra environment variables for the container.
+extraEnv: []
+
+persistence:
+  # false uses an emptyDir: history is lost whenever the pod is rescheduled.
+  enabled: true
+  # Empty uses the cluster's default StorageClass.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+  # What happens to the PVC when the StatefulSet is deleted or scaled down.
+  # Retain keeps history across `helm uninstall`; see docs/install.md.
+  retentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+
+serviceAccount:
+  create: true
+  # Defaults to the fullname.
+  name: ""
+  annotations: {}
+
+rbac:
+  # ClusterRole + ClusterRoleBinding with list/watch on the recorded types.
+  create: true
+
+# A Role in the release namespace granting `get` on services/proxy for the
+# Chronos Service only. Bind it to the users or groups that may use
+# `kubectl at` and the dashboard (example RoleBinding in NOTES).
+readerRole:
+  create: true
+
+service:
+  # The API is ClusterIP only (ADR 0006); there is no Ingress.
+  port: 8080
+  annotations: {}
+
+# Port the server listens on inside the pod (--listen :<port>).
+containerPort: 8080
+
+# The server writes coverage End markers on SIGTERM (up to 30s for the
+# collector flush, 20s for HTTP drain). Keep this at 40s or more.
+terminationGracePeriodSeconds: 45
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+# The HTTP server starts only after the store is open; a large store can
+# take a while to open after an unclean shutdown.
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 60
+
+networkPolicy:
+  # Restrict ingress to the API port. Off by default because the
+  # kube-apiserver service proxy and port-forward reach the pod from
+  # addresses that differ per cluster.
+  enabled: false
+  # Ingress peers allowed to reach the API port. Empty allows any source,
+  # but only on the API port.
+  ingressFrom: []
+  # Egress rules. Empty leaves egress unrestricted. If you set rules, allow
+  # DNS and the kube-apiserver, or the collector cannot work.
+  egress: []
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}

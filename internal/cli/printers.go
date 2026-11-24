@@ -130,7 +130,7 @@ func printTable(w io.Writer, rt api.Resource, items []api.ObjectState, o tableOp
 		if o.showDeleted {
 			row = append(row, deletedCell(it, o.tf))
 		}
-		_, _ = fmt.Fprintln(tw, strings.Join(row, "\t"))
+		_, _ = fmt.Fprintln(tw, strings.Join(safeCells(row), "\t"))
 	}
 	return tw.Flush()
 }

@@ -11,7 +11,8 @@ const pods: Resource = {
   id: 'v1/pods', group: '', version: 'v1', resource: 'pods', kind: 'Pod', namespaced: true, metadataOnly: false, coverage: [],
 };
 
-function renderList(state: AsyncState<ListResponse>, extra: { namespace?: string; labelSelector?: string } = {}) {
+type Paging = { pages: number; loadingMore: boolean; error: unknown; onLoadMore: () => void };
+function renderList(state: AsyncState<ListResponse>, extra: { namespace?: string; labelSelector?: string; paging?: Paging } = {}) {
   const onReload = vi.fn();
   render(
     <ObjectList state={state} resource={pods} onReload={onReload} hrefFor={() => '?'} onOpen={() => undefined} {...extra} />,
@@ -85,5 +86,53 @@ describe('ObjectList states', () => {
   it('prompts for a resource when idle', () => {
     renderList({ status: 'idle' });
     expect(screen.getByText('Choose a resource type to list objects.')).toBeTruthy();
+  });
+
+  const item = (name: string) => ({
+    key: { resource: 'v1/pods', namespace: 'prod', name },
+    at,
+    existence: 'present' as const,
+    coverage: { state: 'observed' as const },
+  });
+
+  it('offers Load more while a continue token is set', () => {
+    const onLoadMore = vi.fn();
+    renderList(
+      { status: 'success', data: { at, coverage: { state: 'observed' }, items: [item('a'), item('b')], continue: 'T' } },
+      { paging: { pages: 1, loadingMore: false, error: null, onLoadMore } },
+    );
+    expect(screen.getByRole('table').querySelector('caption')?.textContent).toContain('2 Pod objects loaded so far');
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    expect(onLoadMore).toHaveBeenCalledOnce();
+  });
+
+  it('disables Load more while loading and shows its errors with retry', () => {
+    const onLoadMore = vi.fn();
+    renderList(
+      { status: 'success', data: { at, coverage: { state: 'observed' }, items: [item('a')], continue: 'T' } },
+      { paging: { pages: 2, loadingMore: true, error: new ApiError(503, 'unavailable', 'busy'), onLoadMore } },
+    );
+    expect((screen.getByRole('button', { name: 'Loading…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain('Chronos is not ready yet');
+    expect(screen.getByRole('table').querySelector('caption')?.textContent).toContain('2 pages loaded');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onLoadMore).toHaveBeenCalledOnce();
+  });
+
+  it('does not claim emptiness when the first page is empty but more exist', () => {
+    renderList(
+      { status: 'success', data: { at, coverage: { state: 'observed' }, items: [], continue: 'T' } },
+      { paging: { pages: 1, loadingMore: false, error: null, onLoadMore: vi.fn() } },
+    );
+    expect(screen.queryByText(/existed/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeTruthy();
+  });
+
+  it('shows no Load more without a continue token', () => {
+    renderList(
+      { status: 'success', data: { at, coverage: { state: 'observed' }, items: [item('a')] } },
+      { paging: { pages: 1, loadingMore: false, error: null, onLoadMore: vi.fn() } },
+    );
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
   });
 });

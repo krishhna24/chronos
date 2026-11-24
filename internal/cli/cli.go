@@ -138,13 +138,13 @@ func printError(w io.Writer, err error) {
 	var ve *verbatimError
 	switch {
 	case errors.As(err, &se):
-		_, _ = fmt.Fprintln(w, se.Error())
+		_, _ = fmt.Fprintln(w, safeText(se.Error()))
 	case errors.As(err, &ve):
-		_, _ = fmt.Fprintln(w, ve.Error())
+		_, _ = fmt.Fprintln(w, safeText(ve.Error()))
 	case errors.Is(err, context.Canceled):
 		_, _ = fmt.Fprintln(w, "error: interrupted")
 	default:
-		_, _ = fmt.Fprintf(w, "error: %s\n", err)
+		_, _ = fmt.Fprintf(w, "error: %s\n", safeText(err.Error()))
 	}
 }
 
@@ -210,7 +210,10 @@ offset are in the local time zone, or UTC with --utc.
 Chronos is reached through the Kubernetes API server's service proxy using your
 kubeconfig; that needs "get" on services/proxy in the Chronos namespace. Use
 --server (or CHRONOS_SERVER) to connect directly, e.g. through
-"kubectl port-forward -n chronos svc/chronos 8080:http".`,
+"kubectl port-forward -n chronos svc/chronos 8080:http".
+
+kubectl does not accept its own flags before a plugin name, so put flags such
+as --kubeconfig and --context after "at": kubectl at --context prod -5m get pods.`,
 		Example: `  # Pods in the current namespace 20 minutes ago
   kubectl at -20m get pods
 
@@ -323,7 +326,7 @@ func (a *app) client() (*client, error) {
 
 // warnf prints a warning to stderr; data goes to stdout only.
 func (a *app) warnf(format string, args ...any) {
-	_, _ = fmt.Fprintf(a.o.ErrOut, "Warning: "+format+"\n", args...)
+	_, _ = fmt.Fprintln(a.o.ErrOut, safeText("Warning: "+fmt.Sprintf(format, args...)))
 }
 
 func (a *app) versionCommand() *cobra.Command {

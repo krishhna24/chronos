@@ -127,7 +127,7 @@ func (ts *testServer) get(t *testing.T, path string, q url.Values) *httptest.Res
 	return ts.do(t, http.MethodGet, target, nil)
 }
 
-func decode[T any](t *testing.T, w *httptest.ResponseRecorder) T {
+func decode[T any](t testing.TB, w *httptest.ResponseRecorder) T {
 	t.Helper()
 	var v T
 	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {

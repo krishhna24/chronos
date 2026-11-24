@@ -1,0 +1,33 @@
+{{- if .Values.rbac.create }}
+# Reflectors only LIST and WATCH; nothing GETs individual objects. Secrets
+# are read through the metadata API, which still needs list/watch on
+# secrets (ADR 0005).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "chronos.clusterName" . }}
+  labels:
+    {{- include "chronos.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "events", "secrets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "chronos.clusterName" . }}
+  labels:
+    {{- include "chronos.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "chronos.clusterName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "chronos.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

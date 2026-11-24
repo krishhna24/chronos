@@ -293,3 +293,4 @@ pre.code.stale { border: 2px dashed var(--warn-border); }
 .phase-Running { color: var(--add); }
 .phase-Pending { color: var(--badge-warn-fg); }
 .phase-Failed { color: var(--del); }
+.load-more { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin: 0.75rem 0; }

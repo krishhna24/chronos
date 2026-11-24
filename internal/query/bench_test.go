@@ -69,21 +69,39 @@ func BenchmarkState(b *testing.B) {
 	}
 }
 
+// BenchmarkList measures single pages (the unit a request now costs) and a
+// full paged walk. "page-10" starts after 4500 keys: View.List has no start
+// key, so its cost includes visiting (not decoding) every earlier key.
 func BenchmarkList(b *testing.B) {
 	e := benchEngine(b)
 	ctx := context.Background()
+	tokenAt := func(req ListRequest, page int) string {
+		for range page - 1 {
+			r, err := e.List(ctx, req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			req.Continue = r.Continue
+		}
+		return req.Continue
+	}
+	all := ListRequest{Resource: pods, At: at(50)}
+	sel := ListRequest{Resource: pods, At: at(50), LabelSelector: "app=web"}
 	for _, bc := range []struct {
-		name, ns, sel string
-		want          int
+		name string
+		req  ListRequest
+		want int
 	}{
-		{"all-namespaces", "", "", benchObjects},
-		{"one-namespace", "ns-03", "", benchObjects / 20},
-		{"all-namespaces-selector", "", "app=web", benchObjects},
+		{"page-1", all, ListDefaultLimit},
+		{"page-10", ListRequest{Resource: pods, At: at(50), Continue: tokenAt(all, 10)}, ListDefaultLimit},
+		{"page-1-one-namespace", ListRequest{Resource: pods, Namespace: "ns-03", At: at(50)}, benchObjects / 20},
+		{"page-1-selector", sel, ListDefaultLimit},
+		{"page-1-limit-5000", ListRequest{Resource: pods, At: at(50), Limit: ListMaxLimit}, ListMaxLimit},
 	} {
 		b.Run(bc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				r, err := e.List(ctx, pods, bc.ns, at(50), bc.sel, false)
+				r, err := e.List(ctx, bc.req)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -93,6 +111,26 @@ func BenchmarkList(b *testing.B) {
 			}
 		})
 	}
+	b.Run("all-pages", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			req, n := all, 0
+			for {
+				r, err := e.List(ctx, req)
+				if err != nil {
+					b.Fatal(err)
+				}
+				n += len(r.Items)
+				if r.Continue == "" {
+					break
+				}
+				req.Continue = r.Continue
+			}
+			if n != benchObjects {
+				b.Fatalf("items = %d", n)
+			}
+		}
+	})
 }
 
 // BenchmarkMemstoreViewOnly is the floor under BenchmarkState: memstore's

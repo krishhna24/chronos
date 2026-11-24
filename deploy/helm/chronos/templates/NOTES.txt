@@ -1,0 +1,73 @@
+{{- $full := include "chronos.fullname" . -}}
+{{- $ns := .Release.Namespace -}}
+Chronos {{ include "chronos.imageTag" . }} is installed as StatefulSet {{ $ns }}/{{ $full }} (1 replica).
+{{- if not .Values.persistence.enabled }}
+
+##############################################################################
+##  WARNING: persistence.enabled=false                                      ##
+##  The data directory is an emptyDir. ALL RECORDED HISTORY IS LOST every   ##
+##  time the pod is deleted, evicted or rescheduled. Use this only for      ##
+##  evaluation. Set persistence.enabled=true for a PersistentVolumeClaim.   ##
+##############################################################################
+{{- end }}
+{{- if eq .Values.config.storage "memory" }}
+
+##############################################################################
+##  WARNING: config.storage=memory                                          ##
+##  History is kept in process memory only and is LOST ON EVERY RESTART.    ##
+##  This is a development mode. Use config.storage=pebble in production.    ##
+##############################################################################
+{{- end }}
+
+Wait for it to become ready:
+
+  kubectl -n {{ $ns }} rollout status statefulset/{{ $full }}
+
+Check the API through the kube-apiserver service proxy:
+
+  kubectl get --raw /api/v1/namespaces/{{ $ns }}/services/{{ $full }}:http/proxy/api/v1/resources
+{{- if or (ne $ns "chronos") (ne $full "chronos") }}
+
+This release is not the default chronos/chronos; point kubectl-at at it:
+
+  export CHRONOS_NAMESPACE={{ $ns }} CHRONOS_SERVICE={{ $full }}
+  # or per command: kubectl at --chronos-namespace {{ $ns }} --chronos-service {{ $full }} ...
+{{- end }}
+
+Open the dashboard:
+
+  kubectl -n {{ $ns }} port-forward svc/{{ $full }} 8080:{{ .Values.service.port }}
+  # then browse http://localhost:8080/
+
+  # or, through kubectl proxy (the trailing slash is required):
+  kubectl proxy
+  # http://localhost:8001/api/v1/namespaces/{{ $ns }}/services/{{ $full }}:http/proxy/
+{{- if .Values.readerRole.create }}
+
+Grant users access. Role {{ $ns }}/{{ $full }}-reader allows `get` on
+services/proxy for this Service only. NOTE: anyone bound to it can read the
+recorded history of EVERY namespace, including deleted objects.
+
+  kubectl apply -f - <<YAML
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: {{ $full }}-readers
+    namespace: {{ $ns }}
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: {{ $full }}-reader
+  subjects:
+    - apiGroup: rbac.authorization.k8s.io
+      kind: Group
+      name: sre            # or kind: User, name: jane@example.com
+  YAML
+{{- end }}
+{{- if .Values.persistence.enabled }}
+
+The history PVC (data-{{ $full }}-0) is retained on `helm uninstall`.
+Delete it explicitly to discard history:
+
+  kubectl -n {{ $ns }} delete pvc data-{{ $full }}-0
+{{- end }}

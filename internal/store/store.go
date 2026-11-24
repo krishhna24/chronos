@@ -87,6 +87,11 @@ type ListOptions struct {
 	Resource  string // required: ResourceType.ID()
 	Namespace string // empty: all namespaces
 	At        time.Time
+	// After, if set, restricts List to keys strictly after
+	// (After.Namespace, After.Name) in key order, so a pager can resume
+	// in O(page) rather than rescanning earlier keys. After.Resource is
+	// ignored.
+	After *model.ObjectKey
 }
 
 // ChangesOptions selects records for View.Changes.
@@ -105,6 +110,10 @@ type View interface {
 	// false when there is none. The record may be a delete.
 	Get(ctx context.Context, key model.ObjectKey, at time.Time) (rec model.Record, ok bool, err error)
 
+	// Key order is (namespace, name), each compared bytewise, namespace
+	// first; every implementation must use exactly this order because
+	// pagers rely on it.
+	//
 	// List calls fn, in key order, with the latest record (ObservedAt <= at)
 	// of every key of the resource (and namespace, if set). Keys whose
 	// latest record is a delete are included; callers decide what to show.

@@ -17,6 +17,9 @@ export interface ObjectListProps {
   onOpen: (item: ObjectState, e: MouseEvent) => void;
   /** Extra per-row actions (e.g. relationships for Deployments). */
   rowActions?: (item: ObjectState) => ReactNode;
+  /** Paging controls; the list shows a "Load more" button while
+   * state.data.continue is set. */
+  paging?: { pages: number; loadingMore: boolean; error: unknown; onLoadMore: () => void };
 }
 
 function emptyMessage(res: ListResponse, kinds: string, where: string, selector?: string): string {
@@ -32,7 +35,7 @@ function emptyMessage(res: ListResponse, kinds: string, where: string, selector?
   }
 }
 
-export function ObjectList({ state, resource, namespace, labelSelector, horizon, onReload, hrefFor, onOpen, rowActions }: ObjectListProps) {
+export function ObjectList({ state, resource, namespace, labelSelector, horizon, onReload, hrefFor, onOpen, rowActions, paging }: ObjectListProps) {
   const kinds = resource ? `${resource.kind} objects` : 'objects';
   const where = namespace ? `in namespace “${namespace}”` : 'in any namespace';
 
@@ -42,17 +45,30 @@ export function ObjectList({ state, resource, namespace, labelSelector, horizon,
 
   const res = state.data;
   const now = Date.now();
+  const more = !!res.continue;
+  const loadMore = paging && more && (
+    <div className="load-more">
+      {paging.error ? <ErrorBox error={paging.error} onRetry={paging.onLoadMore} /> : null}
+      <button type="button" onClick={paging.onLoadMore} disabled={paging.loadingMore} aria-describedby="list-count">
+        {paging.loadingMore ? 'Loading…' : 'Load more'}
+      </button>
+    </div>
+  );
   return (
     <>
       <CoverageBanner coverage={res.coverage} subject={resource ? `${resource.kind} objects` : undefined} horizon={horizon} />
-      {res.items.length === 0 ? (
+      {res.items.length === 0 && !more ? (
         <Empty>{emptyMessage(res, kinds, where, labelSelector)}</Empty>
+      ) : res.items.length === 0 ? (
+        loadMore
       ) : (
         <div className="table-wrap">
           <table className="objects">
-            <caption>
-              {res.items.length} {kinds} at <time dateTime={res.at}>{formatTime(res.at)}</time>
+            <caption id="list-count" aria-live="polite">
+              {more ? `${res.items.length} ${kinds} loaded so far` : `${res.items.length} ${kinds}`} at{' '}
+              <time dateTime={res.at}>{formatTime(res.at)}</time>
               {res.coverage.state === 'gap' && ' (last known state before the gap)'}
+              {more && ` · more available${paging && paging.pages > 1 ? ` · ${paging.pages} pages loaded` : ''}`}
             </caption>
             <thead>
               <tr>
@@ -94,6 +110,7 @@ export function ObjectList({ state, resource, namespace, labelSelector, horizon,
               ))}
             </tbody>
           </table>
+          {loadMore}
         </div>
       )}
     </>

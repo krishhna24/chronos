@@ -207,9 +207,31 @@ func (c *client) list(ctx context.Context, resource, namespace, at, selector str
 	if includeDeleted {
 		q.Set("includeDeleted", "true")
 	}
-	var r api.ListResponse
-	return &r, c.get(ctx, "list", q, &r)
+	// Follow continue tokens; every page is read at the same explicit
+	// `at`, so the concatenation equals one unpaged listing.
+	var all api.ListResponse
+	for page := 0; ; page++ {
+		if page >= maxListPages {
+			return nil, fmt.Errorf("listing %s stopped after %d pages; narrow it with -n or -l", resource, maxListPages)
+		}
+		var r api.ListResponse
+		if err := c.get(ctx, "list", q, &r); err != nil {
+			return nil, err
+		}
+		if page == 0 {
+			all.At, all.Coverage = r.At, r.Coverage
+		}
+		all.Items = append(all.Items, r.Items...)
+		if r.Continue == "" {
+			return &all, nil
+		}
+		q.Set("continue", r.Continue)
+	}
 }
+
+// maxListPages bounds a paged listing (at the server's default page size
+// this is a million objects) so a misbehaving server cannot loop forever.
+const maxListPages = 2000
 
 func (c *client) diff(ctx context.Context, key api.ObjectKey, from, to string) (*api.DiffResponse, error) {
 	q := keyParams(key)
