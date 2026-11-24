@@ -6,6 +6,7 @@
 *.coverprofile
 /data/
 web/node_modules/
-web/dist/
+web/dist/*
+!web/dist/.keep
 .env
 .env.*

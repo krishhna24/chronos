@@ -26,5 +26,8 @@ lint:
 	$(GO) vet $(PKGS)
 	golangci-lint run $(PKGS)
 
+web:
+	cd web && pnpm install --frozen-lockfile && pnpm build
+
 clean:
 	rm -rf $(BIN)
