@@ -1,0 +1,20 @@
+{{- if .Values.readerRole.create }}
+{{- $svc := include "chronos.fullname" . }}
+# For users of `kubectl at` and the dashboard: lets them reach the Chronos
+# API through the kube-apiserver service proxy and nothing else. The
+# authorizer sees the proxied name with its port ("chronos:http"), so both
+# spellings are listed. Anyone bound to this Role can read ALL recorded
+# history of every namespace (ADR 0006).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $svc }}-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chronos.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: [{{ $svc | quote }}, {{ printf "%s:http" $svc | quote }}]
+    verbs: ["get"]
+{{- end }}

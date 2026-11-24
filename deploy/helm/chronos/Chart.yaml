@@ -1,0 +1,20 @@
+apiVersion: v2
+name: chronos
+description: >-
+  A time machine for Kubernetes: records changes to Pods, Deployments,
+  ReplicaSets, Services, ConfigMaps, Events and Secret metadata, and
+  answers what they looked like at any time in the retention window.
+type: application
+# Chart version; bumped on every chart change.
+version: 0.1.0
+# Default image tag (image.tag overrides it).
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/krishhna24/chronos
+sources:
+  - https://github.com/krishhna24/chronos
+keywords:
+  - kubernetes
+  - history
+  - audit
+  - debugging
