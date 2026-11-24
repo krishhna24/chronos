@@ -209,12 +209,13 @@ cat <<EOT
 
 Chronos is running in $CONTEXT ($NAMESPACE/$SVC, storage=$STORAGE).
 
-Try (with kubectl-at on PATH: make build-plugin && export PATH=\$PWD/bin:\$PATH):
+Try (with kubectl-at on PATH: make build-plugin && export PATH=\$PWD/bin:\$PATH).
+kubectl does not accept flags before a plugin name, so they go last:
 
-  kubectl $KC at -5m get pods -n $DEMO_NS
-  kubectl $KC at -5m get deployment/web -n $DEMO_NS -o yaml
-  kubectl $KC at diff -10m now deployment/web -n $DEMO_NS
-  kubectl $KC at history configmap/app-config -n $DEMO_NS
+  kubectl at -5m get pods -n $DEMO_NS $KC
+  kubectl at -5m get deployment/web -n $DEMO_NS -o yaml $KC
+  kubectl at diff -10m now deployment/web -n $DEMO_NS $KC
+  kubectl at history configmap/app-config -n $DEMO_NS $KC
 
 Raw API through the service proxy:
 
