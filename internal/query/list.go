@@ -55,10 +55,11 @@ const (
 // concatenate to the unpaged answer (unless compaction passes the instant
 // between pages, in which case the later page reports "expired").
 //
-// Cost: store.View.List has no start key, so a page iterates (without
-// decoding) every key before the cursor; reaching page k is O(k*limit)
-// key visits. Objects are only decoded for selector matching after the
-// cursor and for returned items.
+// Cost: the store resumes after the cursor (ListOptions.After), so a page
+// visits O(limit) keys plus those filtered out by the selector or delete
+// filtering. Objects are only decoded for selector matching and for
+// returned items. The cursor is also re-checked here, so a store that
+// ignored After would still return correct (if slower) pages.
 func (e *Engine) List(ctx context.Context, req ListRequest) (api.ListResponse, error) {
 	rt, err := lookupResource(req.Resource)
 	if err != nil {
@@ -112,7 +113,7 @@ func (e *Engine) List(ctx context.Context, req ListRequest) (api.ListResponse, e
 			last    model.ObjectKey
 			hasMore bool
 		)
-		opts := store.ListOptions{Resource: req.Resource, Namespace: req.Namespace, At: at}
+		opts := store.ListOptions{Resource: req.Resource, Namespace: req.Namespace, At: at, After: after}
 		err = v.List(ctx, opts, func(r model.Record) error {
 			// Paging relies on the store's key order being (namespace,
 			// name); fail loudly rather than return wrong pages.

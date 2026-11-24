@@ -182,6 +182,57 @@ func Run(t *testing.T, newStore Factory) {
 		}
 	})
 
+	t.Run("ListKeyOrderIsBytewise", func(t *testing.T) {
+		// Encodings such as length-prefixing would sort "b" before "ab".
+		s := newStore(t)
+		keys := []model.ObjectKey{key("b", "a"), key("ab", "zz"), key("a", "b"), key("a", "ab"), key("a", "a-b"), key("a\u00e9", "x"), key("a-", "x")}
+		for _, k := range keys {
+			mustWrite(t, s, rec(k, "u", model.ChangeAdded, t0, k.Namespace+"/"+k.Name))
+		}
+		var got []string
+		for _, r := range list(t, view(t, s), store.ListOptions{Resource: pods, At: t0.Add(time.Hour)}) {
+			got = append(got, string(r.Object))
+		}
+		want := "[a/a-b a/ab a/b a-/x ab/zz a\u00e9/x b/a]"
+		if fmt.Sprint(got) != want {
+			t.Errorf("List order = %v, want %s", got, want)
+		}
+	})
+
+	t.Run("ListAfter", func(t *testing.T) {
+		s := newStore(t)
+		for _, k := range []model.ObjectKey{key("a", "x"), key("a", "y"), key("a", "y2"), key("b", "a"), key("b-", "a")} {
+			mustWrite(t, s, rec(k, "u", model.ChangeAdded, t0, k.Namespace+"/"+k.Name))
+		}
+		v := view(t, s)
+		names := func(opts store.ListOptions) string {
+			var out []string
+			for _, r := range list(t, v, opts) {
+				out = append(out, string(r.Object))
+			}
+			return fmt.Sprint(out)
+		}
+		at := t0.Add(time.Hour)
+		for _, c := range []struct {
+			ns    string
+			after model.ObjectKey
+			want  string
+		}{
+			{"", model.ObjectKey{Namespace: "a", Name: "y"}, "[a/y2 b/a b-/a]"},
+			{"", model.ObjectKey{Namespace: "a", Name: "zzz"}, "[b/a b-/a]"},
+			{"", model.ObjectKey{Namespace: "b", Name: "a"}, "[b-/a]"},
+			{"", model.ObjectKey{Namespace: "", Name: ""}, "[a/x a/y a/y2 b/a b-/a]"},
+			{"a", model.ObjectKey{Namespace: "a", Name: "x"}, "[a/y a/y2]"},
+			{"b", model.ObjectKey{Namespace: "a", Name: "x"}, "[b/a]"},
+			{"", model.ObjectKey{Namespace: "c", Name: ""}, "[]"},
+		} {
+			after := c.after
+			if got := names(store.ListOptions{Resource: pods, Namespace: c.ns, At: at, After: &after}); got != c.want {
+				t.Errorf("List(ns=%q after %s/%s) = %s, want %s", c.ns, c.after.Namespace, c.after.Name, got, c.want)
+			}
+		}
+	})
+
 	t.Run("HistoryAndChanges", func(t *testing.T) {
 		s := newStore(t)
 		a, b := key("ns", "a"), key("other", "b")
