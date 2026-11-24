@@ -117,6 +117,11 @@ func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 				if hasPrev && prev.Type == model.CoverageStart {
 					return fmt.Errorf("%w: entry %d: Start after Start for %s", store.ErrInvalid, i, c.Resource)
 				}
+				if hasPrev && !c.At.After(prev.At) {
+					// The preceding End keeps a caller time that may be
+					// ahead of the clamped clock (wall clock moved back).
+					c.At = prev.At.Add(time.Nanosecond)
+				}
 				c.At = clamp(c.At)
 			case model.CoverageEnd:
 				if !hasPrev || prev.Type != model.CoverageStart {
