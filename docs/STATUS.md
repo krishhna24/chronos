@@ -47,7 +47,7 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 | 2 | high | Events dropped at shutdown under backpressure, no gap | collector | fixing |
 | 3 | high | Crash recovery after compaction crash-loops (End < latest record) | contract + collector + storage | contract done (0e31ed1: View.LatestRecordTime); impl in progress |
 | 4 | medium | Clean watch close advances continuity past undelivered events | collector | fixing |
-| 5 | medium | /list unbounded (84 MB body at 10k pods) | contract + query + cli + web | contract done; CLI paging done (dbc4fed); server + web in progress |
+| 5 | medium | /list unbounded (84 MB body at 10k pods) | contract + query + cli + web | fixed: server paging + 503 load bound (69d5ade, default page 4.2 MB), CLI (dbc4fed), dashboard (279dec5), O(page) resume via ListOptions.After (369393c; pebble impl pending) |
 | 6 | medium | ANSI escape injection in CLI tables | cli | fixed (37c505b) |
 | 7 | medium | Shutdown hangs if a store write blocks | collector | fixing |
 | 8 | medium | ObservedAt late by store stalls while coverage says observed | collector | fixing |
