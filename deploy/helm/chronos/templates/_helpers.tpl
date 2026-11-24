@@ -84,6 +84,10 @@ Server arguments generated from .Values.config.
 {{- with $c.redactAnnotations }}
 - --redact-annotations={{ join "," . }}
 {{- end }}
+{{- with $c.secretAnnotationAllowlist }}
+- --secret-annotation-allowlist={{ join "," . }}
+{{- end }}
+- --stall-timeout={{ $c.stallTimeout }}
 {{- if $c.keepManagedFields }}
 - --keep-managed-fields
 {{- end }}

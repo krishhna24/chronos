@@ -156,7 +156,9 @@ Every server flag and the chart value that sets it:
 | `--retention` | `config.retention` | `168h` | at least `1h` |
 | `--retention-interval` | `config.retentionInterval` | `10m` | |
 | `--resources` | `config.resources` (list) | `[]` = all | e.g. `[pods, deploy, cm]` |
-| `--redact-annotations` | `config.redactAnnotations` (list) | `[]` | `last-applied-configuration` is always removed from Secrets |
+| `--redact-annotations` | `config.redactAnnotations` (list) | `[]` | removed from every object |
+| `--secret-annotation-allowlist` | `config.secretAnnotationAllowlist` (list) | `[]` | the only annotations kept on Secrets; all others are dropped (ADR 0005) |
+| `--stall-timeout` | `config.stallTimeout` | `5s` | a change waiting longer than this for the store ends coverage of its type and forces a relist |
 | `--keep-managed-fields` | `config.keepManagedFields` | `false` | |
 | `--log-level` | `config.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
 | `--log-format` | `config.logFormat` | `json` | `json` or `text` |
