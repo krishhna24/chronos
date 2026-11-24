@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+NAME    READY   STATUS    RESTARTS   AGE   IP         NODE     CHRONOS
+db-0    1/1     Running   0          31m   10.0.0.7   node-a   Added 14:00:00 (baseline)
+web-1   1/1     Running   0          61m   10.0.0.7   node-a   Added 14:00:00 (baseline)
+--- stderr

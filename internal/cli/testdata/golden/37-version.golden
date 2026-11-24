@@ -1,0 +1,4 @@
+exit 0
+--- stdout
+kubectl-at version v1.2.3-test
+--- stderr

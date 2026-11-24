@@ -1,0 +1,11 @@
+exit 0
+--- stdout
+NAME          SHORTNAMES   APIVERSION   NAMESPACED   KIND         RECORDED        COVERAGE
+pods          po           v1           true         Pod          full            14:00:00 to 14:04:00 (watch expired), 14:06:00 to now
+deployments   deploy       apps/v1      true         Deployment   full            14:00:00 to now
+replicasets   rs           apps/v1      true         ReplicaSet   full            14:00:00 to now
+services      svc          v1           true         Service      full            14:00:00 to now
+configmaps    cm           v1           true         ConfigMap    full            14:00:00 to now
+events        ev           v1           true         Event        full            14:00:00 to now
+secrets                    v1           true         Secret       metadata only   14:00:00 to now
+--- stderr

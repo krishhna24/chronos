@@ -1,0 +1,5 @@
+exit 0
+--- stdout
+LAST SEEN           TYPE     REASON   OBJECT      MESSAGE                     FIRST SEEN   COUNT   NAME        CHRONOS
+12m (x3 over 20m)   Normal   Pulled   pod/web-1   Successfully pulled image   20m          3       web-1.17a   Added 14:00:00 (baseline)
+--- stderr

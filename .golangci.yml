@@ -10,3 +10,8 @@ linters:
     gosec:
       excludes:
         - G115 # integer overflow conversions: checked where it matters
+  exclusions:
+    rules:
+      # Tests read and write fixture/golden files under t.TempDir and testdata.
+      - path: _test\.go
+        linters: [gosec]

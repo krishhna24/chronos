@@ -1,0 +1,4 @@
+exit 1
+--- stdout
+--- stderr
+error: Chronos had not started observing pods at 13:59:00 (first observed at 14:00:00); history is unavailable

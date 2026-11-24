@@ -1,0 +1,37 @@
+exit 1
+--- stdout
+--- 2026-11-24T14:01:00Z
++++ 2026-11-24T14:05:00Z
+@@ -1,29 +0,0 @@
+-apiVersion: v1
+-kind: Pod
+-metadata:
+-  creationTimestamp: "2026-11-24T13:00:00Z"
+-  labels:
+-    app: web
+-  name: web-1
+-  namespace: ns
+-  resourceVersion: "1"
+-  uid: 0f1e2d3c-aaaa-4bbb-8ccc-000000000001
+-spec:
+-  containers:
+-  - image: img:v1
+-    name: app
+-    resources: {}
+-  nodeName: node-a
+-status:
+-  containerStatuses:
+-  - image: img:v1
+-    imageID: ""
+-    lastState: {}
+-    name: app
+-    ready: true
+-    restartCount: 0
+-    state:
+-      running:
+-        startedAt: null
+-  phase: Running
+-  podIP: 10.0.0.7
+--- stderr
+Warning: Chronos was not observing pods at 14:05:00 (gap since 14:04:00: watch expired), so its state then is unknown; that side is shown as empty.
+Warning: Chronos was not observing pods for all of 14:01:00 to 14:05:00; changes in between may be missing.

@@ -1,0 +1,5 @@
+exit 0
+--- stdout
+NAME       DESIRED   CURRENT   READY   AGE    CONTAINERS   IMAGES   SELECTOR   CHRONOS
+web-5d4f   3         3         2       130m   app          img:v1   app=web    Added 14:00:00 (baseline)
+--- stderr

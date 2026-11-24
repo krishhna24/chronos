@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+NAME    READY   STATUS    RESTARTS     AGE   DELETED
+db-0    -       -         -            -     14:03:00
+web-1   1/1     Running   1 (2m ago)   63m   -
+--- stderr
