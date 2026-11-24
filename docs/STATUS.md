@@ -23,20 +23,26 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 | --- | --- | --- | --- |
 | Pebble store | Storage agent | `ws/storage` | in progress |
 | Collector + normalization | Collector agent | `ws/collector` | in progress |
-| Query engine + HTTP server | Query agent | `ws/query` | in progress |
-| Dashboard | Frontend agent | `ws/web` | in progress |
-| CLI | CLI agent | after query | blocked on query API |
+| Query engine + HTTP server | Query agent | `ws/query` | merged (c7443c2); verified by orchestrator |
+| Dashboard | Frontend agent | `ws/web` | merged (a6c21ed); verified by orchestrator; not yet viewed in a real browser |
+| CLI (`kubectl at`) | CLI agent | `ws/cli` | in progress |
 | Packaging/CI | DevOps agent | after integration | blocked on cmd/chronos flags |
 
 ## Test results
 | Date | Command | Result |
 | --- | --- | --- |
 | 2026-11-24 | `go test -race ./...` | memstore conformance: pass |
+| 2026-11-24 | web: `pnpm typecheck`, `pnpm test` (102 passed), `pnpm build` (orchestrator re-run) | pass |
+| 2026-11-24 | `go test -race -count=1 ./...` after query merge (orchestrator re-run) | query, server, resources, memstore: pass; golangci-lint 0 issues |
 
 ## Constraints from the owner
 - No open-source license (no LICENSE file, no license fields).
 - Commits authored as the repo owner, no AI attribution trailers.
 - Nothing pushed to the remote without explicit approval.
 
-## Known defects
-None recorded yet.
+## Known defects / follow-ups
+- memstore View copies the key map (~1 ms per View at 10k keys): fine for tests, not for production (pebblestore is the production path).
+- Label-selector List decodes every object (44 ms at 10k on memstore); revisit after pebblestore benchmarks.
+- `/object?seq=` scans the key history; consider `View.GetSeq`.
+- API backlog from the dashboard: namespaces endpoint, `ownerUID`/paging on `/list`, newest-first `/history`.
+- Dashboard under the service proxy needs a trailing slash; server should redirect.

@@ -50,6 +50,12 @@ type Store interface {
 	// Write applies entries atomically and in order. When Write returns nil
 	// the batch is durable (survives process crash). The assigned Seq and
 	// clamped times are written back into the entries.
+	//
+	// Any non-nil error means nothing from the batch was applied, so the
+	// caller may retry it. If an implementation cannot guarantee that (for
+	// example, a durable-sync failure after the commit point), it must stop
+	// accepting writes and return an error wrapping ErrClosed from then on,
+	// so the batch is never applied twice.
 	Write(ctx context.Context, entries []Entry) error
 
 	// View returns a consistent read-only snapshot of the store. Writes and
