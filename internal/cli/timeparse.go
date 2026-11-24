@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -116,6 +117,11 @@ func relative(orig, body string, now time.Time) (time.Time, error) {
 		rest, err := time.ParseDuration(m[2])
 		if err != nil {
 			return time.Time{}, fmt.Errorf("invalid relative time %q: %w", orig, err)
+		}
+		// time.Duration tops out near 292 years; adding past it wraps
+		// negative and would read as a time in the future.
+		if rest < 0 || d > math.MaxInt64-rest {
+			return time.Time{}, fmt.Errorf("invalid relative time %q: too far in the past", orig)
 		}
 		d += rest
 	}

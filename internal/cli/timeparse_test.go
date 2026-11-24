@@ -149,3 +149,11 @@ func TestProtectRelativeTimes(t *testing.T) {
 		t.Fatalf("protectRelativeTimes = %q, want %q", got, want)
 	}
 }
+
+func TestRelativeOverflow(t *testing.T) {
+	p := TimeParser{Now: func() time.Time { return time.Date(2026, 11, 24, 14, 0, 0, 0, time.UTC) }, Location: time.UTC}
+	_, err := p.Parse("-36500d2000000h")
+	if err == nil || !strings.Contains(err.Error(), "too far in the past") {
+		t.Errorf("overflowing relative time: err = %v", err)
+	}
+}

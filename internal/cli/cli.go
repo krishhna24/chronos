@@ -138,13 +138,13 @@ func printError(w io.Writer, err error) {
 	var ve *verbatimError
 	switch {
 	case errors.As(err, &se):
-		_, _ = fmt.Fprintln(w, se.Error())
+		_, _ = fmt.Fprintln(w, safeText(se.Error()))
 	case errors.As(err, &ve):
-		_, _ = fmt.Fprintln(w, ve.Error())
+		_, _ = fmt.Fprintln(w, safeText(ve.Error()))
 	case errors.Is(err, context.Canceled):
 		_, _ = fmt.Fprintln(w, "error: interrupted")
 	default:
-		_, _ = fmt.Fprintf(w, "error: %s\n", err)
+		_, _ = fmt.Fprintf(w, "error: %s\n", safeText(err.Error()))
 	}
 }
 
@@ -323,7 +323,7 @@ func (a *app) client() (*client, error) {
 
 // warnf prints a warning to stderr; data goes to stdout only.
 func (a *app) warnf(format string, args ...any) {
-	_, _ = fmt.Fprintf(a.o.ErrOut, "Warning: "+format+"\n", args...)
+	_, _ = fmt.Fprintln(a.o.ErrOut, safeText("Warning: "+fmt.Sprintf(format, args...)))
 }
 
 func (a *app) versionCommand() *cobra.Command {
