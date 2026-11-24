@@ -27,8 +27,9 @@ RFC 7386 merge patch; periodic snapshot + deltas.
   is one reverse seek — no replay, no patch-application bugs, and corruption
   of one record cannot poison later versions.
 - **Snapshots are list accelerators, not reconstruction bases.** A snapshot
-  manifest at time S lists, per resource, the keys whose latest record at S
-  is not a delete. `List(at=T)` uses the newest snapshot ≤ T plus the time
+  manifest at time S lists, per resource, every key with a record at S
+  (deleted keys included, because `View.List` reports them; a live-only
+  manifest would answer differently from the scan path). `List(at=T)` uses the newest snapshot ≤ T plus the time
   index over (S, T], instead of scanning every key ever seen (7 days of Pod
   churn leaves many dead keys). Snapshots are taken periodically (default
   1h) and are always derivable from the journal, so a missing or corrupt
@@ -48,3 +49,18 @@ bytes on disk per change for a representative Deployment/Pod update mix
 (compared against raw JSON and against JSON merge-patch size), Get and List
 latency at 10k live objects with 7 days of churn, compaction time.
 If full-object storage exceeds 3× the merge-patch size on disk, revisit.
+
+## Results (measured 2026-11-25, see internal/store/pebblestore benchmarks)
+Dataset: 10k live objects (1k Deployments, 9k Pods), 7 days of churn,
+218,884 records, 1,153 MB raw JSON. Hardware: Ryzen 7 6800HS, WSL2.
+- Disk per change: zstd with 64 KiB blocks 279 B, vs 857 B for initial
+  object + JSON merge patches (0.33x; the 3x revisit threshold is not
+  hit). With Pebble's default 4 KiB blocks it was 1,892 B, because each
+  ~5 KB object filled a block alone; block size is therefore pinned.
+- Get: 35-67 us. List one namespace: ~3 ms. List cluster-wide at the
+  latest time: ~580 ms (40k keys, 31k of them deleted pods) — over the
+  100 ms target; callers page with ListOptions.After.
+- Manifests help cluster-wide List at older times (315 vs 439 ms) and are
+  neutral elsewhere at this scale; kept because their benefit grows with
+  dead-key churn.
+- Batch write: ~8-10k records/s at batch 100 (fsync per batch).

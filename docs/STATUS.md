@@ -1,6 +1,6 @@
 # Chronos engineering status
 
-Updated: 2026-11-24
+Updated: 2026-11-25
 
 ## Phase
 - [x] Phase 1 — Reconnaissance: local dir and GitHub repo
@@ -9,7 +9,10 @@ Updated: 2026-11-24
   `internal/model`, `internal/store` contract, memstore reference store,
   storetest conformance suite, `internal/api` wire types, `docs/api.md`.
 - [ ] Phase 3 — Core implementation (parallel workstreams below)
-- [ ] Phase 4 — Integration: `cmd/chronos` wired (bd68e72); smoke-tested on kind with memory storage (deployment image diff correct, dashboard served, clean SIGTERM). Pebble wiring pending.
+- [x] Phase 4 — Integration: all components wired; pebble default.
+- [~] Phase 5 — Adversarial verification: one independent review round
+  (13 findings, all fixed with regression tests); restart/crash verified;
+  chaos and scale testing still to do.
 - [ ] Phase 5 — Adversarial verification
 - [ ] Phase 6 — Rebuild and hardening
 - [ ] Phase 7 — Release readiness (image/chart/CI/install docs exist; blocked on pebble + review fixes)
@@ -21,7 +24,7 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 ## Workstreams
 | Workstream | Owner | Branch | Status |
 | --- | --- | --- | --- |
-| Pebble store | Storage agent | `ws/storage` | in progress (resumed): benchmarks + Write poisoning |
+| Pebble store | Storage agent | `ws/storage` | merged (1f1fa70), default backend (cmd/chronos); conformance + differential + SIGKILL crash + poison + corruption tests re-run by orchestrator: pass |
 | Collector + normalization | Collector agent | `ws/collector` | merged incl. review fixes (a926075); reviewer's original repros re-run by orchestrator: 5/6 pass, 1 obsolete (asserted End <= last record, contradicting the +1ns fix; no false continuity) |
 | Query engine + HTTP server | Query agent | `ws/query` | merged (c7443c2); verified by orchestrator |
 | Dashboard | Frontend agent | `ws/web` | merged (a6c21ed); verified by orchestrator; not yet viewed in a real browser |
@@ -40,14 +43,27 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 - Commits authored as the repo owner, no AI attribution trailers.
 - Nothing pushed to the remote without explicit approval.
 
+## MVP definition of done (verified 2026-11-25 on kind chronos-dev)
+| # | Criterion | Evidence |
+| --- | --- | --- |
+| 1 | Install into a cluster | `hack/kind-demo.sh` (Helm chart, pebble on PVC), rc=0 twice |
+| 2 | Collect supported resources | all 7 types `observed` in /resources |
+| 3 | Make changes | demo scenario: rollout, scale, configmap delete+recreate |
+| 4 | Query historical state | `kubectl at <t> get` via service proxy |
+| 5 | Compare two states | `kubectl at diff` incl. recreated warning |
+| 6 | `kubectl at` plugin | 38 golden cases + live use through the service proxy |
+| 7 | Dashboard | all four views screenshotted in headless Chromium against the in-cluster server; "now" bug found and fixed (94e38da) |
+| 8 | Restart without losing history | pod deleted: prior records intact, 3 s gap shown, change made while down recorded as `resync` |
+| 9 | Incomplete history is visible | GAP rows (CLI), gap shading/banners (dashboard), `unknown` existence, crash-recovery End |
+
 ## Independent review (2026-11-25) — remediation
 | # | Severity | Finding | Owner | Status |
 | --- | --- | --- | --- | --- |
 | 1 | critical | Shutdown during failed relist claims continuity to shutdown time | collector | fixed (a926075), regression test ported |
 | 2 | high | Events dropped at shutdown under backpressure, no gap | collector | fixed (a926075), regression test ported |
-| 3 | high | Crash recovery after compaction crash-loops (End < latest record) | contract + collector + storage | fixed in collector (a926075); pebble LatestRecordTime pending |
+| 3 | high | Crash recovery after compaction crash-loops (End < latest record) | contract + collector + storage | fixed (a926075 collector, 1f1fa70 pebble) |
 | 4 | medium | Clean watch close advances continuity past undelivered events | collector | fixed (a926075), regression test ported |
-| 5 | medium | /list unbounded (84 MB body at 10k pods) | contract + query + cli + web | fixed: server paging + 503 load bound (69d5ade, default page 4.2 MB), CLI (dbc4fed), dashboard (279dec5), O(page) resume via ListOptions.After (369393c; pebble impl pending) |
+| 5 | medium | /list unbounded (84 MB body at 10k pods) | contract + query + cli + web | fixed: server paging + 503 load bound (69d5ade, default page 4.2 MB), CLI (dbc4fed), dashboard (279dec5), O(page) resume via ListOptions.After (369393c, pebble seek in 1f1fa70) |
 | 6 | medium | ANSI escape injection in CLI tables | cli | fixed (37c505b) |
 | 7 | medium | Shutdown hangs if a store write blocks | collector | fixed (a926075), regression test ported |
 | 8 | medium | ObservedAt late by store stalls while coverage says observed | collector | fixed (a926075), regression test ported |
@@ -58,6 +74,12 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 | – | low | /readyz ignores collector sync and store health | orchestrator | decided (d63b6c3): ready = store readable; sync deliberately excluded |
 
 ## Known defects / follow-ups
+- Cluster-wide List at 10k live + 30k dead keys takes ~580 ms (target 100 ms);
+  paging mitigates. Option: ListOptions.IncludeDeleted so the store can skip
+  deleted keys (measured ~2.1x faster).
+- `kubectl at ... -o jsonpath` / `custom-columns` not supported.
+- Not yet tested: end-to-end scale (10k objects through the collector),
+  API-server interruption chaos, disk-full, GitHub Actions workflows.
 - memstore View copies the key map (~1 ms per View at 10k keys): fine for tests, not for production (pebblestore is the production path).
 - Label-selector List decodes every object (44 ms at 10k on memstore); revisit after pebblestore benchmarks.
 - `/object?seq=` scans the key history; consider `View.GetSeq`.
