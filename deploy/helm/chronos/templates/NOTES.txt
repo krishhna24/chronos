@@ -28,9 +28,10 @@ Check the API through the kube-apiserver service proxy:
   kubectl get --raw /api/v1/namespaces/{{ $ns }}/services/{{ $full }}:http/proxy/api/v1/resources
 {{- if or (ne $ns "chronos") (ne $full "chronos") }}
 
-This release is not the default chronos/chronos, so point kubectl-at at it
-(see `kubectl at --help` for the exact flags) with namespace "{{ $ns }}" and
-service "{{ $full }}".
+This release is not the default chronos/chronos; point kubectl-at at it:
+
+  export CHRONOS_NAMESPACE={{ $ns }} CHRONOS_SERVICE={{ $full }}
+  # or per command: kubectl at --chronos-namespace {{ $ns }} --chronos-service {{ $full }} ...
 {{- end }}
 
 Open the dashboard:
