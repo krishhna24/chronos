@@ -9,7 +9,10 @@ Errors: non-2xx with body `api.Error{code, message}`.
 `400 bad_request` (missing/invalid parameter, unknown resource, time in the
 future), `404 not_found` (unknown route only — a missing *object* is a 200
 with `existence: "absent"` or `"unknown"`), `500 internal`,
-`503 unavailable` (store not open yet).
+`503 unavailable` (store not open yet, request timeout).
+`405` with code `bad_request` for a wrong method on a known route.
+`/object` with a seq that does not exist for the key (e.g. compacted) is
+`400 bad_request`.
 
 `resource` is always the canonical ID (`v1/pods`, `apps/v1/deployments`).
 Clients resolve aliases using `GET /api/v1/resources`.
@@ -18,9 +21,9 @@ Clients resolve aliases using `GET /api/v1/resources`.
 | --- | --- | --- |
 | `GET /api/v1/resources` | – | `ResourcesResponse`: supported types with coverage intervals, retention horizon, server time |
 | `GET /api/v1/state` | `resource`, `namespace` (namespaced types), `name`, `at` (default now) | `ObjectState` |
-| `GET /api/v1/list` | `resource`, `namespace` (empty = all), `at` (default now), `labelSelector` (Kubernetes syntax), `includeDeleted` (bool, default false) | `ListResponse`. Items are objects with existence `present` (observed) or `unknown` (gap, last known). With `includeDeleted`, keys whose latest record is a delete are included with `absent`. Sorted by namespace, name. |
+| `GET /api/v1/list` | `resource`, `namespace` (empty = all), `at` (default now), `labelSelector` (Kubernetes syntax), `includeDeleted` (bool, default false) | `ListResponse`. Items are objects with existence `present` (observed) or `unknown` (gap, last known). With `includeDeleted`, keys whose latest record is a delete are included with `absent` when coverage is `observed`, or `unknown` (version only, no object) during a gap. Sorted by namespace, name. |
 | `GET /api/v1/diff` | `resource`, `namespace`, `name`, `from`, `to` (from < to) | `DiffResponse` |
-| `GET /api/v1/history` | `resource`, `namespace`, `name`, `from`, `to` (default: horizon..now), `limit` (default 1000) | `HistoryResponse` |
+| `GET /api/v1/history` | `resource`, `namespace`, `name`, `from`, `to` (default: horizon..now), `limit` (1–10000, default 1000) | `HistoryResponse`; `coverage` lists only intervals overlapping [from, to] |
 | `GET /api/v1/changes` | `from`, `to` (required), `resource`, `namespace`, `limit` (default 1000, max 10000) | `ChangesResponse`, Seq order |
 | `GET /api/v1/object` | `resource`, `namespace`, `name`, `seq` | `ObjectState` for exactly that record (used by the dashboard to open a version from history) |
 | `GET /healthz`, `GET /readyz` | – | `200 ok` / `503` |

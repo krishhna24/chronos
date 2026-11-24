@@ -2,10 +2,10 @@
 /dist/
 *.test
 *.out
-coverage.*
+/coverage.*
+*.coverprofile
 /data/
 web/node_modules/
 web/dist/
-!internal/server/webdist/.keep
 .env
 .env.*

@@ -44,7 +44,8 @@ type Entry struct {
 //     the latest Start time for that resource, and the resource's latest
 //     coverage event must be a Start. Otherwise the batch fails ErrInvalid.
 //   - A CoverageStart requires that the resource's latest coverage event
-//     is an End or that there is none.
+//     is an End or that there is none. Its At is clamped like a record's
+//     and, additionally, to be strictly after that End's At.
 type Store interface {
 	// Write applies entries atomically and in order. When Write returns nil
 	// the batch is durable (survives process crash). The assigned Seq and

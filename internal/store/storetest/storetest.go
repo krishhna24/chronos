@@ -268,6 +268,23 @@ func Run(t *testing.T, newStore Factory) {
 		}
 	})
 
+	t.Run("StartAfterEndWhenClockMovesBack", func(t *testing.T) {
+		s := newStore(t)
+		mustWrite(t, s, cov(pods, model.CoverageStart, t0))
+		end := cov(pods, model.CoverageEnd, t0.Add(time.Hour))
+		mustWrite(t, s, end)
+		start := cov(pods, model.CoverageStart, t0.Add(time.Minute))
+		mustWrite(t, s, start)
+		if !start.Coverage.At.After(end.Coverage.At) {
+			t.Errorf("Start at %s is not after End at %s", start.Coverage.At, end.Coverage.At)
+		}
+		r := rec(key("ns", "a"), "u", model.ChangeAdded, t0.Add(2*time.Minute), "x")
+		mustWrite(t, s, r)
+		if !r.Record.ObservedAt.After(start.Coverage.At) {
+			t.Errorf("record at %s is not after Start at %s", r.Record.ObservedAt, start.Coverage.At)
+		}
+	})
+
 	t.Run("FailedBatchIsAtomic", func(t *testing.T) {
 		s := newStore(t)
 		a := key("ns", "a")
