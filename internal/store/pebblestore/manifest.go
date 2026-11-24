@@ -26,18 +26,16 @@ import (
 // Manifests include keys whose latest record is a delete because
 // View.List must report them (see the package documentation).
 func (s *Store) Snapshot(ctx context.Context) error {
+	if err := s.beginOp(); err != nil {
+		return err
+	}
+	defer s.ops.Done()
+	ctx, cancel := s.opContext(ctx)
+	defer cancel()
 	s.maintMu.Lock()
 	defer s.maintMu.Unlock()
 
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return store.ErrClosed
-	}
-	if err := s.poisonErr(); err != nil {
-		s.mu.Unlock()
-		return err
-	}
 	at, lastSeq, horizon, prev := s.lastTime, s.seq, s.horizon, s.lastManifest
 	resources := slices.Sorted(maps.Keys(s.lastRec))
 	var snap *pebble.Snapshot
@@ -80,7 +78,12 @@ func (s *Store) Snapshot(ctx context.Context) error {
 	}
 
 	b := s.db.NewBatch()
-	defer func() { _ = b.Close() }()
+	owned := true // until handed to commitWait
+	defer func() {
+		if owned {
+			_ = b.Close()
+		}
+	}()
 	for _, res := range resources {
 		for ns, es := range chunks[res] {
 			k := chunkKey(at, res, ns)
@@ -94,7 +97,8 @@ func (s *Store) Snapshot(ctx context.Context) error {
 		return fmt.Errorf("pebblestore: snapshot: %w", err)
 	}
 	size := b.Len()
-	if err := s.commit(b, "snapshot manifest commit"); err != nil {
+	owned = false
+	if err := s.commitWait(b, "snapshot manifest commit"); err != nil {
 		return err
 	}
 	s.mu.Lock()

@@ -29,6 +29,13 @@ const FormatVersion = 1
 // Options.SnapshotInterval is zero (ADR 0001).
 const DefaultSnapshotInterval = time.Hour
 
+// DefaultCloseTimeout is the default Options.CloseTimeout.
+const DefaultCloseTimeout = 10 * time.Second
+
+// DefaultBlockSize is the default Options.BlockSize; see the package
+// documentation for the measurement behind it.
+const DefaultBlockSize = 32 << 10
+
 // Compression selects Pebble block compression.
 type Compression string
 
@@ -52,6 +59,15 @@ type Options struct {
 	Compression Compression
 	// CacheSize is the Pebble block cache size in bytes. Zero means 64 MiB.
 	CacheSize int64
+	// BlockSize is the target uncompressed SSTable data block size. Zero
+	// means DefaultBlockSize. Normalized objects are 2-8 KB, so with
+	// Pebble's 4 KiB default each block holds about one version and the
+	// compressor never sees two versions of an object together.
+	BlockSize int
+	// CloseTimeout bounds how long Close waits for commits already inside
+	// Pebble (an fsync on a hung disk cannot be interrupted). Zero means
+	// DefaultCloseTimeout.
+	CloseTimeout time.Duration
 
 	// fs, if set, replaces the OS filesystem (tests inject I/O failures).
 	fs vfs.FS
@@ -64,8 +80,22 @@ type Store struct {
 	log *slog.Logger
 	dir string
 
-	// mu guards the writer bookkeeping below and serializes Write,
-	// SetHeartbeat and View creation against Close.
+	// writeSem serializes Write and SetHeartbeat (single writer). It is a
+	// channel rather than a mutex so that a writer waiting behind a stuck
+	// commit can give up when the store closes or its context ends.
+	writeSem chan struct{}
+	// closing is canceled when Close starts; waiting writers and running
+	// maintenance observe it.
+	closing      context.Context
+	cancelClose  context.CancelFunc
+	closeTimeout time.Duration
+	// ops counts mutating calls and commit goroutines in flight; Close
+	// waits for it (bounded by closeTimeout) before closing Pebble.
+	ops sync.WaitGroup
+
+	// mu guards closed, the views set, and publication of the writer
+	// bookkeeping below. The bookkeeping is mutated only by the writeSem
+	// holder (under mu); other readers take mu.
 	mu        sync.Mutex
 	closed    bool
 	seq       uint64
@@ -126,7 +156,14 @@ func Open(dir string, opts Options) (*Store, error) {
 		lastRec: map[string]time.Time{},
 		lastCov: map[string]model.CoverageEvent{},
 		views:   map[*view]struct{}{},
+
+		writeSem:     make(chan struct{}, 1),
+		closeTimeout: opts.CloseTimeout,
 	}
+	if s.closeTimeout <= 0 {
+		s.closeTimeout = DefaultCloseTimeout
+	}
+	s.closing, s.cancelClose = context.WithCancel(context.Background())
 	if err := s.load(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("pebblestore: open %s: %w", dir, err)
@@ -175,7 +212,12 @@ func pebbleOptions(opts Options, log *slog.Logger) (*pebble.Options, *pebble.Cac
 	if opts.fs != nil {
 		popts.FS = opts.fs
 	}
+	blockSize := opts.BlockSize
+	if blockSize <= 0 {
+		blockSize = DefaultBlockSize
+	}
 	for i := range popts.Levels {
+		popts.Levels[i].BlockSize = blockSize
 		popts.Levels[i].Compression = func() *sstable.CompressionProfile { return profile }
 		// Whole-key bloom filters speed up exact-key Gets (Changes and the
 		// manifest List path look versions up by exact key).
@@ -241,6 +283,73 @@ func (s *Store) poison(what string, cause error) error {
 	}
 	s.poisonMu.Unlock()
 	return err
+}
+
+// beginOp registers a mutating call; the caller must call s.ops.Done.
+// It fails once Close has started or the store is poisoned.
+func (s *Store) beginOp() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return store.ErrClosed
+	}
+	if err := s.poisonErr(); err != nil {
+		return err
+	}
+	s.ops.Add(1)
+	return nil
+}
+
+// acquireWriter takes the single-writer slot, giving up when ctx ends or
+// the store closes. The caller releases it with <-s.writeSem.
+func (s *Store) acquireWriter(ctx context.Context) error {
+	select {
+	case s.writeSem <- struct{}{}:
+	case <-s.closing.Done():
+		return store.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if s.closing.Err() != nil {
+		<-s.writeSem
+		return store.ErrClosed
+	}
+	return nil
+}
+
+// opContext returns ctx that is also canceled when Close starts.
+func (s *Store) opContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.closing, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+// commitWait commits b (taking ownership of it) on a separate goroutine
+// and waits for the result or for Close. Pebble commits cannot be
+// interrupted, so when Close wins the commit's outcome is unknown and the
+// error wraps store.ErrClosed, which the Write contract reserves for that
+// case. The goroutine is counted in s.ops so Close does not close Pebble
+// under it.
+func (s *Store) commitWait(b *pebble.Batch, what string) error {
+	done := make(chan error, 1)
+	s.ops.Add(1)
+	go func() {
+		defer s.ops.Done()
+		defer func() { _ = b.Close() }()
+		done <- s.commit(b, what)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-s.closing.Done():
+		select {
+		case err := <-done:
+			return err
+		default:
+		}
+		s.log.Warn("store closed while a commit was in flight", "op", what)
+		return fmt.Errorf("%w: pebblestore: store closed while the %s was in flight; whether it committed is unknown", store.ErrClosed, what)
+	}
 }
 
 // poisonErr returns the poisoning error, or nil.
@@ -385,18 +494,24 @@ func closeIter(it *pebble.Iterator) error {
 }
 
 // Write implements store.Store.
+//
+// Writes are serialized. A Write that is waiting for the writer slot, or
+// whose commit is still inside Pebble, returns as soon as Close starts:
+// in the first case nothing was applied and the error is store.ErrClosed;
+// in the second the outcome is unknown and the error also wraps
+// store.ErrClosed (see commitWait).
 func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return store.ErrClosed
-	}
-	if err := s.poisonErr(); err != nil {
+	if err := s.beginOp(); err != nil {
 		return err
 	}
+	defer s.ops.Done()
+	if err := s.acquireWriter(ctx); err != nil {
+		return err
+	}
+	defer func() { <-s.writeSem }()
 
 	// Validate and assign against scratch bookkeeping; nothing is mutated
 	// and nothing is committed unless the whole batch is valid.
@@ -486,7 +601,12 @@ func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 	}
 
 	b := s.db.NewBatch()
-	defer func() { _ = b.Close() }()
+	owned := true // until handed to commitWait
+	defer func() {
+		if owned {
+			_ = b.Close()
+		}
+	}()
 	for i, e := range entries {
 		if e.Record != nil {
 			r := &recs[i]
@@ -515,7 +635,8 @@ func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 	if err := b.Set(keyState, seal(keyState, encodeState(seq, lastTime)), nil); err != nil {
 		return fmt.Errorf("pebblestore: build batch: %w", err)
 	}
-	if err := s.commit(b, fmt.Sprintf("commit of a %d-entry batch", len(entries))); err != nil {
+	owned = false
+	if err := s.commitWait(b, fmt.Sprintf("commit of a %d-entry batch", len(entries))); err != nil {
 		return err
 	}
 
@@ -527,9 +648,11 @@ func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 			e.Coverage.Seq, e.Coverage.At = covs[i].Seq, covs[i].At
 		}
 	}
+	s.mu.Lock()
 	maps.Copy(s.lastRec, lastRec)
 	maps.Copy(s.lastCov, lastCov)
 	s.seq, s.lastTime = seq, lastTime
+	s.mu.Unlock()
 	return nil
 }
 
@@ -539,27 +662,29 @@ func (s *Store) SetHeartbeat(ctx context.Context, t time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return store.ErrClosed
-	}
-	if err := s.poisonErr(); err != nil {
+	if err := s.beginOp(); err != nil {
 		return err
 	}
+	defer s.ops.Done()
+	if err := s.acquireWriter(ctx); err != nil {
+		return err
+	}
+	defer func() { <-s.writeSem }()
 	t = normTime(t)
 	if !t.After(s.heartbeat) {
 		return nil
 	}
 	b := s.db.NewBatch()
-	defer func() { _ = b.Close() }()
 	if err := b.Set(keyHeartbeat, seal(keyHeartbeat, encodeTimeValue(t)), nil); err != nil {
+		_ = b.Close()
 		return fmt.Errorf("pebblestore: write heartbeat: %w", err)
 	}
-	if err := s.commit(b, "heartbeat"); err != nil {
+	if err := s.commitWait(b, "heartbeat commit"); err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.heartbeat = t
+	s.mu.Unlock()
 	return nil
 }
 
@@ -600,9 +725,20 @@ func (s *Store) forgetView(v *view) {
 	s.mu.Unlock()
 }
 
-// Close implements store.Store. It waits for a running Compact or Snapshot
-// and for in-flight View calls, closes all open Views, then closes Pebble.
-// Close is idempotent.
+// Close implements store.Store. Close is idempotent and never blocks
+// indefinitely on a writer:
+//
+//  1. New calls fail with store.ErrClosed. Writes waiting for the writer
+//     slot return store.ErrClosed (nothing applied). A Write whose commit
+//     is inside Pebble returns at once with an error wrapping
+//     store.ErrClosed (outcome unknown). Compact and Snapshot see their
+//     context canceled.
+//  2. Close waits up to Options.CloseTimeout for commits already inside
+//     Pebble and for running Compact/Snapshot calls to finish. If they do
+//     not (an fsync on a hung disk cannot be interrupted), Close returns an
+//     error and leaves Pebble open; the process is expected to exit.
+//  3. Otherwise it closes all open Views (waiting for their in-flight
+//     calls) and then Pebble.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -611,13 +747,25 @@ func (s *Store) Close() error {
 	}
 	s.closed = true
 	s.mu.Unlock()
+	s.cancelClose()
 
 	if s.stopBG != nil {
 		close(s.stopBG)
-		<-s.bgDone
 	}
-	s.maintMu.Lock()
-	defer s.maintMu.Unlock()
+	idle := make(chan struct{})
+	go func() {
+		s.ops.Wait()
+		if s.bgDone != nil {
+			<-s.bgDone
+		}
+		close(idle)
+	}()
+	select {
+	case <-idle:
+	case <-time.After(s.closeTimeout):
+		s.log.Error("close timed out waiting for an in-flight commit; leaving Pebble open", "timeout", s.closeTimeout)
+		return fmt.Errorf("pebblestore: close: an in-flight commit did not finish within %s (stuck I/O?); Pebble was left open", s.closeTimeout)
+	}
 
 	s.mu.Lock()
 	views := slices.Collect(maps.Keys(s.views))

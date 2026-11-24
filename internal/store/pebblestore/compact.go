@@ -10,7 +10,6 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 
 	"github.com/krishhna24/chronos/internal/model"
-	"github.com/krishhna24/chronos/internal/store"
 )
 
 // Compact implements store.Store.
@@ -32,19 +31,17 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := s.beginOp(); err != nil {
+		return err
+	}
+	defer s.ops.Done()
+	ctx, cancel := s.opContext(ctx)
+	defer cancel()
 	s.maintMu.Lock()
 	defer s.maintMu.Unlock()
 	horizon = normTime(horizon)
 
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return store.ErrClosed
-	}
-	if err := s.poisonErr(); err != nil {
-		s.mu.Unlock()
-		return err
-	}
 	if !horizon.After(s.horizon) {
 		s.mu.Unlock()
 		return nil
@@ -55,7 +52,12 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 
 	start := time.Now()
 	b := s.db.NewBatch()
-	defer func() { _ = b.Close() }()
+	owned := true // until handed to commitWait
+	defer func() {
+		if owned {
+			_ = b.Close()
+		}
+	}()
 	var stats struct{ records, coverage, manifests int }
 	del := func(keys ...[]byte) error {
 		for _, k := range keys {
@@ -171,7 +173,8 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 	if err := b.Set(keyHorizon, seal(keyHorizon, encodeTimeValue(horizon)), nil); err != nil {
 		return fmt.Errorf("pebblestore: compact: %w", err)
 	}
-	if err := s.commit(b, "compaction commit"); err != nil {
+	owned = false
+	if err := s.commitWait(b, "compaction commit"); err != nil {
 		return err
 	}
 	s.mu.Lock()
