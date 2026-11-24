@@ -80,16 +80,16 @@ func (p *params) bool(name string) bool {
 	return b
 }
 
-// limit parses a page size in [1, query.MaxLimit]; absent yields 0, which
-// the engine turns into query.DefaultLimit.
-func (p *params) limit() int {
+// limit parses a page size in [1, maxLimit]; absent yields 0, which the
+// engine turns into its default.
+func (p *params) limit(maxLimit int) int {
 	v := p.str("limit")
 	if v == "" {
 		return 0
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 || n > query.MaxLimit {
-		p.fail("parameter \"limit\": %q must be an integer between 1 and %d", v, query.MaxLimit)
+	if err != nil || n < 1 || n > maxLimit {
+		p.fail("parameter \"limit\": %q must be an integer between 1 and %d", v, maxLimit)
 		return 0
 	}
 	return n
@@ -132,15 +132,19 @@ func (s *server) state(r *http.Request) (any, error) {
 
 func (s *server) list(r *http.Request) (any, error) {
 	p := newParams(r)
-	resource := p.required("resource")
-	ns := p.str("namespace")
-	at := p.time("at", false)
-	sel := p.str("labelSelector")
-	includeDeleted := p.bool("includeDeleted")
+	req := query.ListRequest{
+		Resource:       p.required("resource"),
+		Namespace:      p.str("namespace"),
+		At:             p.time("at", false),
+		LabelSelector:  p.str("labelSelector"),
+		IncludeDeleted: p.bool("includeDeleted"),
+		Limit:          p.limit(query.ListMaxLimit),
+		Continue:       p.str("continue"),
+	}
 	if p.err != nil {
 		return nil, p.err
 	}
-	return s.engine.List(r.Context(), resource, ns, at, sel, includeDeleted)
+	return s.engine.List(r.Context(), req)
 }
 
 func (s *server) diff(r *http.Request) (any, error) {
@@ -157,7 +161,7 @@ func (s *server) history(r *http.Request) (any, error) {
 	p := newParams(r)
 	key := p.key()
 	from, to := p.time("from", false), p.time("to", false)
-	limit := p.limit()
+	limit := p.limit(query.MaxLimit)
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -168,7 +172,7 @@ func (s *server) changes(r *http.Request) (any, error) {
 	p := newParams(r)
 	from, to := p.time("from", true), p.time("to", true)
 	resource, ns := p.str("resource"), p.str("namespace")
-	limit := p.limit()
+	limit := p.limit(query.MaxLimit)
 	if p.err != nil {
 		return nil, p.err
 	}
