@@ -339,6 +339,11 @@ func (h *diffHarness) compareViews(where string, mv, pv store.View) {
 		t.Fatalf("%s: Resources mem=%v peb=%v err=%v", where, mres, pres, err)
 	}
 	for _, res := range diffResources {
+		ml, err1 := mv.LatestRecordTime(ctx, res)
+		pl, err2 := pv.LatestRecordTime(ctx, res)
+		if err := errors.Join(err1, err2); err != nil || !ml.Equal(pl) {
+			t.Fatalf("%s: LatestRecordTime(%s) mem=%s peb=%s err=%v", where, res, ml, pl, err)
+		}
 		mc, err1 := mv.Coverage(ctx, res)
 		pc, err2 := pv.Coverage(ctx, res)
 		if err := errors.Join(err1, err2); err != nil {

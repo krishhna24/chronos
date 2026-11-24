@@ -397,3 +397,25 @@ func readResources(ctx context.Context, r pebbleReader) ([]string, error) {
 	// Key order of escaped components equals string order.
 	return out, closeIter(it)
 }
+
+// LatestRecordTime implements store.View. It reads the resource's L key,
+// which every Write that adds a record of the resource updates in the
+// same batch and which Compact never deletes, so it equals the bound
+// CoverageEnd validation uses, survives reopen, and is consistent with
+// the rest of the view's snapshot.
+func (v *view) LatestRecordTime(ctx context.Context, resource string) (time.Time, error) {
+	if err := v.begin(ctx); err != nil {
+		return time.Time{}, err
+	}
+	defer v.end()
+	k := lastRecKey(resource)
+	val, closer, err := v.snap.Get(k)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("pebblestore: read %s: %w", describeKey(k), err)
+	}
+	defer func() { _ = closer.Close() }()
+	return decodeTimeValue(k, val)
+}

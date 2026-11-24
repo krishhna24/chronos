@@ -134,6 +134,16 @@ func TestRestartDurability(t *testing.T) {
 		t.Errorf("End before last record after restart: %v", err)
 	}
 	mustWrite(t, s, covEntry("v1/pods", model.CoverageEnd, dt0.Add(2*time.Hour)))
+	// LatestRecordTime survived the restart and the compaction that
+	// removed b's records: it is the newest pods record ever written.
+	lv, err := s.View(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := lv.LatestRecordTime(ctx, "v1/pods"); err != nil || !got.Equal(e.Record.ObservedAt) {
+		t.Errorf("LatestRecordTime after restart = %s, %v; want %s", got, err, e.Record.ObservedAt)
+	}
+	_ = lv.Close()
 	// The horizon survived and an equal Compact is a no-op.
 	v, err := s.View(ctx)
 	if err != nil {
