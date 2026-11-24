@@ -15,6 +15,7 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/bloom"
 	"github.com/cockroachdb/pebble/v2/sstable"
+	"github.com/cockroachdb/pebble/v2/vfs"
 
 	"github.com/krishhna24/chronos/internal/model"
 	"github.com/krishhna24/chronos/internal/store"
@@ -51,6 +52,9 @@ type Options struct {
 	Compression Compression
 	// CacheSize is the Pebble block cache size in bytes. Zero means 64 MiB.
 	CacheSize int64
+
+	// fs, if set, replaces the OS filesystem (tests inject I/O failures).
+	fs vfs.FS
 }
 
 // Store is a durable store.Store backed by Pebble. It is safe for
@@ -81,6 +85,11 @@ type Store struct {
 	bgDone chan struct{}
 
 	stats listStats
+
+	// poisoned is set after an ambiguous commit failure; every later
+	// mutation returns it (it wraps store.ErrClosed).
+	poisonMu sync.Mutex
+	poisoned error
 }
 
 // listStats counts which path served View.List (tests assert on it).
@@ -163,6 +172,9 @@ func pebbleOptions(opts Options, log *slog.Logger) (*pebble.Options, *pebble.Cac
 		Cache:              cache,
 		Logger:             slogAdapter{log},
 	}
+	if opts.fs != nil {
+		popts.FS = opts.fs
+	}
 	for i := range popts.Levels {
 		popts.Levels[i].Compression = func() *sstable.CompressionProfile { return profile }
 		// Whole-key bloom filters speed up exact-key Gets (Changes and the
@@ -187,7 +199,55 @@ func (a slogAdapter) Errorf(format string, args ...any) {
 func (a slogAdapter) Fatalf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	a.l.Error(msg, "source", "pebble", "fatal", true)
-	panic("pebble: " + msg)
+	panic(pebbleFatal{msg: msg})
+}
+
+// pebbleFatal is the panic value of slogAdapter.Fatalf. Pebble calls
+// Fatalf when its commit pipeline fails (for example a WAL fsync error),
+// after which it is unknown whether the batch was applied. commit recovers
+// it on the committing goroutine and poisons the store.
+type pebbleFatal struct{ msg string }
+
+// commit commits b with pebble.Sync. Any failure is treated as ambiguous:
+// Pebble may have applied the batch to its memtable and written part or
+// all of it to the WAL, so the store poisons itself and the returned error
+// wraps store.ErrClosed. A caller that retries therefore never applies a
+// batch twice (store.go Write contract). Must be called with s.mu held
+// or, for maintenance batches, after checking s.poisoned under s.mu.
+func (s *Store) commit(b *pebble.Batch, what string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			f, ok := r.(pebbleFatal)
+			if !ok {
+				panic(r)
+			}
+			err = errors.New(f.msg)
+		}
+		if err != nil {
+			err = s.poison(what, err)
+		}
+	}()
+	return b.Commit(pebble.Sync)
+}
+
+// poison marks the store unusable for writes after an ambiguous failure.
+// It must not take s.mu when the caller holds it, so it uses its own lock.
+func (s *Store) poison(what string, cause error) error {
+	err := fmt.Errorf("%w: pebblestore: %s failed after the commit point, store is poisoned and must be reopened: %w", store.ErrClosed, what, cause)
+	s.poisonMu.Lock()
+	if s.poisoned == nil {
+		s.poisoned = err
+		s.log.Error("store poisoned: refusing further writes", "op", what, "err", cause)
+	}
+	s.poisonMu.Unlock()
+	return err
+}
+
+// poisonErr returns the poisoning error, or nil.
+func (s *Store) poisonErr() error {
+	s.poisonMu.Lock()
+	defer s.poisonMu.Unlock()
+	return s.poisoned
 }
 
 func (s *Store) getValue(key []byte) ([]byte, bool, error) {
@@ -334,6 +394,9 @@ func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 	if s.closed {
 		return store.ErrClosed
 	}
+	if err := s.poisonErr(); err != nil {
+		return err
+	}
 
 	// Validate and assign against scratch bookkeeping; nothing is mutated
 	// and nothing is committed unless the whole batch is valid.
@@ -452,8 +515,8 @@ func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 	if err := b.Set(keyState, seal(keyState, encodeState(seq, lastTime)), nil); err != nil {
 		return fmt.Errorf("pebblestore: build batch: %w", err)
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		return fmt.Errorf("pebblestore: commit batch of %d entries: %w", len(entries), err)
+	if err := s.commit(b, fmt.Sprintf("commit of a %d-entry batch", len(entries))); err != nil {
+		return err
 	}
 
 	// Committed: publish bookkeeping and write back assigned values.
@@ -481,12 +544,20 @@ func (s *Store) SetHeartbeat(ctx context.Context, t time.Time) error {
 	if s.closed {
 		return store.ErrClosed
 	}
+	if err := s.poisonErr(); err != nil {
+		return err
+	}
 	t = normTime(t)
 	if !t.After(s.heartbeat) {
 		return nil
 	}
-	if err := s.db.Set(keyHeartbeat, seal(keyHeartbeat, encodeTimeValue(t)), pebble.Sync); err != nil {
+	b := s.db.NewBatch()
+	defer func() { _ = b.Close() }()
+	if err := b.Set(keyHeartbeat, seal(keyHeartbeat, encodeTimeValue(t)), nil); err != nil {
 		return fmt.Errorf("pebblestore: write heartbeat: %w", err)
+	}
+	if err := s.commit(b, "heartbeat"); err != nil {
+		return err
 	}
 	s.heartbeat = t
 	return nil

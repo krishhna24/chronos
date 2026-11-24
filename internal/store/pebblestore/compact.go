@@ -41,6 +41,10 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 		s.mu.Unlock()
 		return store.ErrClosed
 	}
+	if err := s.poisonErr(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	if !horizon.After(s.horizon) {
 		s.mu.Unlock()
 		return nil
@@ -167,8 +171,8 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 	if err := b.Set(keyHorizon, seal(keyHorizon, encodeTimeValue(horizon)), nil); err != nil {
 		return fmt.Errorf("pebblestore: compact: %w", err)
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		return fmt.Errorf("pebblestore: commit compaction: %w", err)
+	if err := s.commit(b, "compaction commit"); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	s.horizon = horizon

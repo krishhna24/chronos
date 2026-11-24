@@ -34,6 +34,10 @@ func (s *Store) Snapshot(ctx context.Context) error {
 		s.mu.Unlock()
 		return store.ErrClosed
 	}
+	if err := s.poisonErr(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	at, lastSeq, horizon, prev := s.lastTime, s.seq, s.horizon, s.lastManifest
 	resources := slices.Sorted(maps.Keys(s.lastRec))
 	var snap *pebble.Snapshot
@@ -90,8 +94,8 @@ func (s *Store) Snapshot(ctx context.Context) error {
 		return fmt.Errorf("pebblestore: snapshot: %w", err)
 	}
 	size := b.Len()
-	if err := b.Commit(pebble.Sync); err != nil {
-		return fmt.Errorf("pebblestore: commit snapshot manifest: %w", err)
+	if err := s.commit(b, "snapshot manifest commit"); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	s.lastManifest = at
