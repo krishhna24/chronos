@@ -100,7 +100,16 @@ func TestAmbiguousCommitFailurePoisonsStore(t *testing.T) {
 			t.Errorf("%s after poisoning: err=%v, want ErrClosed", name, err)
 		}
 	}
-	_ = s.Close() // Pebble's commit pipeline is broken; its Close error is expected
+	// Reads keep working on the poisoned store.
+	if pv, err := s.View(ctx); err != nil {
+		t.Errorf("View after poisoning: %v", err)
+	} else {
+		if _, found, err := pv.Get(ctx, podKey("ns", "ok"), dt0.Add(time.Hour)); err != nil || !found {
+			t.Errorf("Get after poisoning: found=%v err=%v", found, err)
+		}
+		_ = pv.Close()
+	}
+	t.Logf("Close of poisoned store: %v", s.Close())
 
 	// After reopening, the acknowledged batch is there, the retry is not,
 	// and the ambiguous batch is either fully present or absent.
