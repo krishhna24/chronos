@@ -51,16 +51,26 @@
 // error wrapping store.ErrCorrupt that names the key; data that fails
 // validation is never returned.
 //
-// # Compression
+// # Compression and block size
 //
 // SSTable blocks use zstd (level 3, Pebble's ZstdCompression profile) on
-// every level. Objects are stored whole (ADR 0001); successive versions of
-// one object are adjacent in the V table and share data blocks, and zstd's
-// larger window and entropy coder exploit that redundancy far better than
-// Snappy, Pebble's default. The write rate of a cluster journal (hundreds
-// of changes per second at most) leaves ample CPU for it. Options.
-// Compression can select Snappy or none; the benchmark in this package
-// reports bytes per change for each.
+// every level, with 64 KiB data blocks (Options.BlockSize). Objects are
+// stored whole (ADR 0001); successive versions of one object are adjacent
+// in the V table, and a block must hold several of them for the
+// compressor to exploit that. Normalized Pods and Deployments are 2-8 KB,
+// so Pebble's 4 KiB default holds about one version per block. Measured
+// by BenchmarkDiskPerChange (2,000 Pods and 500 Deployments, 20 status
+// updates each, 52,500 changes, avg 5,376 B raw JSON, 857 B per change as
+// initial object plus JSON merge patches):
+//
+//	zstd   4 KiB 1,892 B/change   32 KiB 419   64 KiB 279  (0.33x merge patch)
+//	snappy 4 KiB 2,609 B/change   32 KiB 775   64 KiB 605
+//	none          ~5,500 B/change
+//
+// 64 KiB blocks were also faster than 32 KiB for Get and List on the
+// churn dataset (fewer index entries and block loads), so they are the
+// default. Options.Compression and Options.BlockSize exist so operators
+// can trade CPU and read amplification for disk.
 //
 // # Snapshot manifests
 //
@@ -77,8 +87,14 @@
 // ADR 0001 describes manifests as listing only keys whose latest record is
 // not a delete. View.List, however, must report keys whose latest record
 // is a delete, so a live-only manifest cannot produce the same answer as
-// the scan; this package therefore includes deleted keys. See the
-// benchmark results in bench_test.go for what that means for the speed-up.
+// the scan; this package therefore includes deleted keys. That limits what
+// a manifest can save: List must still read the record of every key
+// deleted within retention. On the 7-day churn dataset (10k live objects,
+// 40,620 pod keys within retention) the manifest path was about as fast as
+// the scan for namespace Lists and for cluster-wide Lists at the latest
+// time, and about 1.4x faster for cluster-wide Lists three days back; see
+// bench_test.go. Manifests are kept because they are cheap, always
+// correct, and their benefit grows with the ratio of dead to live keys.
 //
 // Compact deletes manifests older than the new horizon (they depend on time
 // index entries Compact removes). A newer manifest can still name a key
@@ -87,7 +103,7 @@
 // was built under, and such entries are skipped when the horizon has moved
 // since.
 //
-// # Concurrency and durability
+// # Concurrency, durability and shutdown
 //
 // Writes are validated in full against scratch bookkeeping, then committed
 // as one Pebble batch with pebble.Sync, so a failing batch leaves no trace
@@ -95,4 +111,18 @@
 // it reads the horizon from that snapshot too. Compact computes its
 // deletions from a snapshot and commits them in one synced batch without
 // blocking writers.
+//
+// Any commit failure is treated as ambiguous (Pebble may already have
+// applied the batch; a failed WAL fsync often leaves it durable), so the
+// store poisons itself: that call and every later mutation return an
+// error wrapping store.ErrClosed until the store is reopened, and a
+// retried batch can never be applied twice. Reads keep working.
+//
+// Close never blocks indefinitely on a writer. Writes queued for the
+// single writer slot return store.ErrClosed with nothing applied; a Write
+// whose commit is inside Pebble returns at once with an error wrapping
+// store.ErrClosed (outcome unknown, the commit cannot be interrupted).
+// Close then waits up to Options.CloseTimeout for such commits before
+// closing Pebble, and returns an error, leaving Pebble open, if the disk
+// never answers.
 package pebblestore

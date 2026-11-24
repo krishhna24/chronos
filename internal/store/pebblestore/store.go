@@ -34,7 +34,7 @@ const DefaultCloseTimeout = 10 * time.Second
 
 // DefaultBlockSize is the default Options.BlockSize; see the package
 // documentation for the measurement behind it.
-const DefaultBlockSize = 32 << 10
+const DefaultBlockSize = 64 << 10
 
 // Compression selects Pebble block compression.
 type Compression string
