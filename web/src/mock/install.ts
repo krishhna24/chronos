@@ -5,9 +5,11 @@
 import { buildFixture } from './fixtures';
 import { createMockServer } from './server';
 
-export function installMock(opts: { latencyMs?: number } = {}): void {
+export function installMock(opts: { latencyMs?: number; listLimit?: number } = {}): void {
   const latency = opts.latencyMs ?? 250;
-  const handle = createMockServer(buildFixture());
+  // A small default page size so "Load more" and multi-page fetches are
+  // exercised against the fixtures.
+  const handle = createMockServer(buildFixture(), Date.now, { defaultListLimit: opts.listLimit ?? 5 });
   const realFetch = globalThis.fetch.bind(globalThis);
 
   globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

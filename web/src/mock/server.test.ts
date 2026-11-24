@@ -91,4 +91,50 @@ describe('mock server fixtures', () => {
     expect(get('state', { resource: POD, name: 'x', at: new Date(NOW + 3_600_000).toISOString() }).status).toBe(400);
     expect(get('nope').status).toBe(404);
   });
+
+  it('pages /list with continue tokens at one instant', () => {
+    const paged = createMockServer(fx, () => NOW, { defaultListLimit: 3 });
+    const call = (params: Record<string, string>) => {
+      const u = new URL('http://x/api/v1/list');
+      for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+      return paged(u) as { status: number; body: ListResponse & { code?: string } };
+    };
+    const base = { resource: POD, at: at(120) };
+    const unpaged = call({ ...base, limit: '5000' }).body.items.map((i) => `${i.key.namespace}/${i.key.name}`);
+    expect(unpaged.length).toBeGreaterThan(3);
+    const names: string[] = [];
+    let res = call(base).body;
+    let pages = 1;
+    for (;;) {
+      expect(res.items.length).toBeLessThanOrEqual(3);
+      names.push(...res.items.map((i) => `${i.key.namespace}/${i.key.name}`));
+      if (!res.continue) break;
+      res = call({ ...base, continue: res.continue }).body;
+      pages++;
+    }
+    expect(pages).toBe(Math.ceil(unpaged.length / 3));
+    expect(names).toEqual(unpaged);
+
+    const tok = call(base).body.continue!;
+    expect(call({ resource: POD, continue: tok })).toMatchObject({ status: 400, body: { code: 'bad_request' } });
+    expect(call({ resource: POD, at: at(121), continue: tok }).status).toBe(400);
+    expect(call({ ...base, namespace: 'prod', continue: tok }).status).toBe(400);
+    expect(call({ ...base, continue: 'garbage' }).status).toBe(400);
+    for (const limit of ['0', '5001', 'x']) expect(call({ ...base, limit }).status).toBe(400);
+  });
+
+  it('never returns an object for a delete record', () => {
+    const h = get<HistoryResponse>('history', { resource: DEPLOY, namespace: 'prod', name: 'worker' }).body;
+    const del = h.versions.find((v) => v.type === 'Deleted')!;
+    const o = get<ObjectState>('object', { resource: DEPLOY, namespace: 'prod', name: 'worker', seq: String(del.seq) }).body;
+    expect(o.version?.type).toBe('Deleted');
+    expect(o.object).toBeUndefined();
+  });
+
+  it('lists deleted keys as unknown, version only, during a gap', () => {
+    const { body } = get<ListResponse>('list', { resource: 'v1/configmaps', namespace: 'prod', at: at(85), includeDeleted: 'true' });
+    const ff = body.items.find((i) => i.key.name === 'feature-flags')!;
+    expect(ff).toMatchObject({ existence: 'unknown', version: { type: 'Deleted' } });
+    expect(ff.object).toBeUndefined();
+  });
 });
