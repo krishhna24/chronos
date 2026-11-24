@@ -35,6 +35,13 @@ config:
   # it is stored. kubectl.kubernetes.io/last-applied-configuration is always
   # removed from Secrets regardless of this list.
   redactAnnotations: []
+  # --secret-annotation-allowlist: the only annotation keys kept on Secrets.
+  # Secret annotations can carry credentials, so all others are dropped.
+  secretAnnotationAllowlist: []
+  # --stall-timeout: if a received change waits longer than this for the
+  # store, coverage of its type ends and the type is relisted, so recorded
+  # change times are never late by more than this.
+  stallTimeout: 5s
   # --keep-managed-fields: store metadata.managedFields (large).
   keepManagedFields: false
   # --log-level: debug, info, warn or error.

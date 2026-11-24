@@ -213,8 +213,9 @@ func TestSecretFullObjectIsStripped(t *testing.T) {
 		if len(m) != 3 || m["apiVersion"] != "v1" || m["kind"] != "Secret" || m["metadata"] == nil {
 			t.Fatalf("unexpected top-level fields: %s", r.Object)
 		}
-		if !strings.Contains(string(r.Object), `"team":"storage"`) {
-			t.Fatalf("ordinary annotation lost: %s", r.Object)
+		// No allow-list: no annotations at all.
+		if strings.Contains(string(r.Object), "annotations") {
+			t.Fatalf("annotations kept without an allow-list: %s", r.Object)
 		}
 	}
 }
@@ -305,5 +306,38 @@ func TestClusterScopedHasNoNamespace(t *testing.T) {
 	}
 	if r.Namespace != "" || r.Key(rt) != (model.ObjectKey{Resource: "v1/nodes", Name: "n1"}) {
 		t.Fatalf("key: %+v", r.Key(rt))
+	}
+}
+
+func TestSecretAnnotationAllowlist(t *testing.T) {
+	s := fullSecret()
+	anns := s.GetAnnotations()
+	anns["openshift.io/token-secret.value"] = "plain-text-token"
+	s.SetAnnotations(anns)
+	opts := Options{
+		MetadataOnlyAnnotationAllowlist: []string{"team", "vault/path", LastAppliedAnnotation},
+		RedactAnnotations:               []string{"vault/path"},
+	}
+	r, err := Normalize(secrets, s, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoSecretContent(t, r.Object)
+	for _, bad := range []string{"openshift.io", "vault/path"} {
+		if bytes.Contains(r.Object, []byte(bad)) {
+			t.Fatalf("annotation %q survived: %s", bad, r.Object)
+		}
+	}
+	if !bytes.Contains(r.Object, []byte(`"annotations":{"team":"storage"}`)) {
+		t.Fatalf("allow-listed annotation lost: %s", r.Object)
+	}
+	// Labels are not affected.
+	if !bytes.Contains(r.Object, []byte(`"labels":{"app":"db"}`)) {
+		t.Fatalf("labels lost: %s", r.Object)
+	}
+	// Non-metadata-only types keep their annotations.
+	d, _ := Normalize(deployments, deployment(), opts)
+	if !bytes.Contains(d.Object, []byte(`"note":"<keep & raw>"`)) {
+		t.Fatalf("allow-list must not apply to full types: %s", d.Object)
 	}
 }

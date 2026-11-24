@@ -43,6 +43,8 @@ type config struct {
 	retentionInterval time.Duration
 	resources         string
 	redact            string
+	secretAnnotations string
+	stallTimeout      time.Duration
 	keepManagedFields bool
 	logLevel          string
 	logFormat         string
@@ -62,6 +64,8 @@ func parseFlags(args []string) (config, error) {
 	fs.DurationVar(&c.retentionInterval, "retention-interval", 10*time.Minute, "how often retention runs")
 	fs.StringVar(&c.resources, "resources", "", "comma-separated resource types to record (default: all supported)")
 	fs.StringVar(&c.redact, "redact-annotations", "", "comma-separated annotation keys removed from every object before storing")
+	fs.StringVar(&c.secretAnnotations, "secret-annotation-allowlist", "", "comma-separated annotation keys kept on secrets; all other secret annotations are dropped because they can carry credentials")
+	fs.DurationVar(&c.stallTimeout, "stall-timeout", 5*time.Second, "if a received change waits longer than this for the store, coverage of its type ends and the type is relisted, so recorded times are never later than this")
 	fs.BoolVar(&c.keepManagedFields, "keep-managed-fields", false, "store metadata.managedFields (large; never kept for secrets)")
 	fs.StringVar(&c.logLevel, "log-level", "info", "debug, info, warn or error")
 	fs.StringVar(&c.logFormat, "log-format", "json", "json or text")
@@ -73,6 +77,9 @@ func parseFlags(args []string) (config, error) {
 	}
 	if c.retention < time.Hour {
 		return c, fmt.Errorf("--retention must be at least 1h, got %s", c.retention)
+	}
+	if c.stallTimeout <= 0 {
+		return c, fmt.Errorf("--stall-timeout must be positive")
 	}
 	if c.retentionInterval <= 0 {
 		return c, fmt.Errorf("--retention-interval must be positive")
@@ -196,15 +203,17 @@ func run(args []string) error {
 
 	clk := clock.RealClock{}
 	col, err := collector.New(collector.Config{
-		Dynamic:   dyn,
-		Metadata:  meta,
-		Store:     st,
-		Resources: types,
-		Clock:     clk,
-		Logger:    log,
+		Dynamic:      dyn,
+		Metadata:     meta,
+		Store:        st,
+		Resources:    types,
+		Clock:        clk,
+		Logger:       log,
+		StallTimeout: cfg.stallTimeout,
 		Normalize: normalize.Options{
-			KeepManagedFields: cfg.keepManagedFields,
-			RedactAnnotations: splitList(cfg.redact),
+			KeepManagedFields:               cfg.keepManagedFields,
+			RedactAnnotations:               splitList(cfg.redact),
+			MetadataOnlyAnnotationAllowlist: splitList(cfg.secretAnnotations),
 		},
 	})
 	if err != nil {
@@ -217,8 +226,12 @@ func run(args []string) error {
 		log.Warn("dashboard assets not built; serving placeholder page (run make web)")
 	}
 	handler := server.New(server.Options{
-		Engine:    engine,
-		Readiness: func() error { return nil },
+		Engine: engine,
+		// Ready means the store can serve reads. Collector sync state is
+		// deliberately not part of it: taking the only replica out of the
+		// Service during a relist would cut users off exactly when they
+		// need history, and gaps are already reported in every answer.
+		Readiness: func() error { return storeReadable(st) },
 		Web:       webFS,
 		Logger:    log.With("component", "http"),
 	})
@@ -256,6 +269,16 @@ func run(args []string) error {
 	}
 	wg.Wait()
 	return runErr
+}
+
+func storeReadable(st store.Store) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	v, err := st.View(ctx)
+	if err != nil {
+		return fmt.Errorf("store not readable: %w", err)
+	}
+	return v.Close()
 }
 
 func retentionLoop(ctx context.Context, st store.Store, clk clock.WithTicker, cfg config, log *slog.Logger) {

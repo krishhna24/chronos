@@ -35,6 +35,7 @@ const (
 	DefaultQueueSize         = 1024
 	DefaultWriteRetryTimeout = 30 * time.Second
 	DefaultShutdownTimeout   = 30 * time.Second
+	DefaultStallTimeout      = 5 * time.Second
 )
 
 // Config configures a Collector.
@@ -70,6 +71,9 @@ type Config struct {
 	WriteRetryTimeout time.Duration
 	// ShutdownTimeout bounds the final flush and End writes. Default 30s.
 	ShutdownTimeout time.Duration
+	// StallTimeout: an event that waits longer than this for queue space
+	// ends the resource's coverage and forces a relist. Default 5s.
+	StallTimeout time.Duration
 
 	// ListerWatcherFor, if set, supplies the list/watch source of every
 	// resource instead of Dynamic/Metadata (tests, custom transports).
@@ -137,9 +141,12 @@ func New(cfg Config) (*Collector, error) {
 	if cfg.ShutdownTimeout <= 0 {
 		cfg.ShutdownTimeout = DefaultShutdownTimeout
 	}
+	if cfg.StallTimeout <= 0 {
+		cfg.StallTimeout = DefaultStallTimeout
+	}
 
 	log := cfg.Logger.With("component", "collector")
-	c := &Collector{cfg: cfg, log: log, q: newQueue(cfg.QueueSize, cfg.Clock)}
+	c := &Collector{cfg: cfg, log: log, q: newQueue(cfg.QueueSize)}
 	c.w = &writer{
 		store:        cfg.Store,
 		clock:        cfg.Clock,
@@ -165,7 +172,7 @@ func New(cfg Config) (*Collector, error) {
 			return nil, err
 		}
 		r := &resource{rt: rt, id: id, known: map[nsName]objState{}}
-		r.src = newSource(r, lw, c.q, cfg.Clock, cfg.Normalize, log)
+		r.src = newSource(r, lw, c.q, cfg.Clock, cfg.StallTimeout, cfg.Normalize, log)
 		var expected runtime.Object = &unstructured.Unstructured{}
 		if rt.MetadataOnly {
 			expected = &metav1.PartialObjectMetadata{}
@@ -257,30 +264,46 @@ func (c *Collector) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	case fatal = <-werr:
 	}
+	// Record which sources still had continuity before stopping them
+	// (stopping closes their streams).
+	for _, r := range c.res {
+		r.src.stopping()
+	}
 	rcancel()
 	wg.Wait()
 	if fatal != nil {
 		return fatal
 	}
 
-	// Every accepted item is stamped before this point, so the shutdown
+	// Every accepted item was received before this point, so the shutdown
 	// item (stamped now) bounds them all.
+	//
+	// The final flush and End writes are bounded by ShutdownTimeout. If the
+	// store's Write ignores cancellation and does not return, Run gives up
+	// and returns an error while the writer goroutine is still inside
+	// Write; the caller then closes the store, and Store.Close must make
+	// that Write return. The next start treats the open coverage as a
+	// crash.
 	sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.ShutdownTimeout)
 	defer scancel()
 	stop := context.AfterFunc(sctx, wcancel)
 	defer stop()
-	if _, err := c.q.put(sctx, item{kind: itemShutdown}); err != nil {
-		wcancel()
-		if werr := <-werr; werr != nil {
-			c.log.Debug("writer stopped", "err", werr)
+	err := c.q.put(sctx, item{kind: itemShutdown, at: c.cfg.Clock.Now()}, c.cfg.Clock, 0, nil)
+	if err == nil {
+		select {
+		case err = <-werr:
+			if err == nil {
+				c.log.Info("collector stopped")
+				return nil
+			}
+			return err
+		case <-sctx.Done():
+			err = sctx.Err()
 		}
-		return fmt.Errorf("collector: shutdown: %w", err)
 	}
-	if err := <-werr; err != nil {
-		return err
-	}
-	c.log.Info("collector stopped")
-	return nil
+	c.log.Error("shutdown did not complete within the timeout; coverage left open (treated as a crash on next start)",
+		"timeout", c.cfg.ShutdownTimeout, "err", err)
+	return fmt.Errorf("collector: shutdown: final writes not completed within %s: %w", c.cfg.ShutdownTimeout, err)
 }
 
 func (c *Collector) heartbeats(ctx context.Context) {
@@ -292,6 +315,13 @@ func (c *Collector) heartbeats(ctx context.Context) {
 			return
 		case <-t.C():
 		}
+		// at is read before the sources are checked. A source stamps its
+		// items and marks them waiting under its own lock, so every item
+		// received before at is either already in the queue (and so ahead
+		// of this heartbeat) or still waiting, which makes the source
+		// unhealthy and skips the heartbeat. Hence a written heartbeat
+		// never covers a received-but-unwritten change.
+		at := c.cfg.Clock.Now()
 		healthy := true
 		for _, r := range c.res {
 			if !r.src.healthy() {
@@ -299,7 +329,7 @@ func (c *Collector) heartbeats(ctx context.Context) {
 				break
 			}
 		}
-		if healthy && !c.q.tryPut(item{kind: itemHeartbeat, healthy: true}) {
+		if healthy && !c.q.tryPut(item{kind: itemHeartbeat, at: at, healthy: true}) {
 			c.log.Debug("heartbeat skipped: writer queue full")
 		}
 	}

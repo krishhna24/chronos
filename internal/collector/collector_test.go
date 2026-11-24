@@ -78,7 +78,7 @@ func TestWatchEvents(t *testing.T) {
 		"Deleted/watch ns/b ub",
 		"Deleted/watch ns/a ua",
 		"Added/watch ns/a ua2",
-		"Deleted/watch ns/a ua2",
+		"Deleted/resync ns/a ua2",
 		"Added/watch ns/a ua3",
 	)
 	recs := recordsOf(t, st, cmID)
@@ -178,8 +178,8 @@ func TestRelistAfterGoneWritesEndResyncStart(t *testing.T) {
 	end := cov[1]
 	// Continuity is known up to the last event received (t1), not the
 	// relist time: everything in (t1, t2] is a gap.
-	if !end.At.Equal(recs[5].ObservedAt) || end.Reason != reasonRelist {
-		t.Fatalf("End = %+v, want At = last watch record time %v", end, recs[5].ObservedAt)
+	if !end.At.Equal(recs[5].ObservedAt.Add(time.Nanosecond)) || end.Reason != reasonRelist {
+		t.Fatalf("End = %+v, want At = just after the last watch record %v", end, recs[5].ObservedAt)
 	}
 	for _, r := range recs[6:] {
 		if r.ObservedAt.Before(t2) {
@@ -276,8 +276,8 @@ func TestRestartAfterCrashEndsAtHeartbeat(t *testing.T) {
 		wantEnd   time.Time
 	}{
 		{"heartbeat after last record", t0.Add(5 * time.Second), t0.Add(5 * time.Second)},
-		{"last record after heartbeat", t0.Add(500 * time.Millisecond), t0.Add(time.Second)},
-		{"no heartbeat", time.Time{}, t0.Add(time.Second)},
+		{"last record after heartbeat", t0.Add(500 * time.Millisecond), t0.Add(time.Second + time.Nanosecond)},
+		{"no heartbeat", time.Time{}, t0.Add(time.Second + time.Nanosecond)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := memstore.New()
@@ -384,6 +384,7 @@ func TestSecretsUseMetadataClientAndNeverStoreData(t *testing.T) {
 	c, err := New(Config{
 		Dynamic: dyn, Metadata: md, Store: st,
 		Resources:     []resourcesType{configmaps, secretsRT},
+		Normalize:     normalize.Options{MetadataOnlyAnnotationAllowlist: []string{"owner"}},
 		Clock:         testingclock.NewFakeClock(t0),
 		Logger:        testLogger(),
 		FlushInterval: -1,

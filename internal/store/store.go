@@ -79,6 +79,9 @@ type Store interface {
 	// Compact must be safe to run concurrently with Write and open Views.
 	Compact(ctx context.Context, horizon time.Time) error
 
+	// Close releases the store. It must make any in-flight Write return
+	// (with an error wrapping ErrClosed if it did not commit), so a writer
+	// that timed out waiting for a stuck Write is not left blocked forever.
 	Close() error
 }
 

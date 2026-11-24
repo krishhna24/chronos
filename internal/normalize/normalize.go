@@ -11,9 +11,13 @@
 //     type.
 //   - MetadataOnly types (Secrets) produce only apiVersion, kind and
 //     metadata, never data or stringData, even when handed a full object.
-//     The kubectl.kubernetes.io/last-applied-configuration annotation, which
-//     contains the full object including data, is dropped, and so is
-//     managedFields (its field set names the data keys), regardless of
+//     Their annotations are dropped except those listed in
+//     Options.MetadataOnlyAnnotationAllowlist (default: none). Annotations
+//     on Secrets routinely carry credentials or the whole object
+//     (kubectl.kubernetes.io/last-applied-configuration includes data;
+//     others such as openshift.io/token-secret.value hold tokens), so an
+//     allow-list is the only safe default. managedFields are dropped too
+//     (their field set names the data keys), regardless of
 //     Options.KeepManagedFields.
 //   - The hash covers the stored object minus metadata.resourceVersion and
 //     metadata.managedFields, so writes that change neither the content nor
@@ -51,6 +55,10 @@ type Options struct {
 	KeepManagedFields bool
 	// RedactAnnotations are annotation keys removed from every object.
 	RedactAnnotations []string
+	// MetadataOnlyAnnotationAllowlist are the only annotation keys kept on
+	// MetadataOnly types (still subject to RedactAnnotations, and never
+	// the last-applied annotation). Empty: no annotations are kept.
+	MetadataOnlyAnnotationAllowlist []string
 }
 
 // Hash is the SHA-256 of an object's hashed view.
@@ -134,12 +142,19 @@ func normalizeMap(rt model.ResourceType, content map[string]any, opts Options) (
 	meta = maps.Clone(meta)
 
 	if anns, ok := meta["annotations"].(map[string]any); ok {
-		anns = maps.Clone(anns)
+		if rt.MetadataOnly {
+			kept := map[string]any{}
+			for _, k := range opts.MetadataOnlyAnnotationAllowlist {
+				if v, ok := anns[k]; ok && k != LastAppliedAnnotation {
+					kept[k] = v
+				}
+			}
+			anns = kept
+		} else {
+			anns = maps.Clone(anns)
+		}
 		for _, k := range opts.RedactAnnotations {
 			delete(anns, k)
-		}
-		if rt.MetadataOnly {
-			delete(anns, LastAppliedAnnotation)
 		}
 		if len(anns) == 0 {
 			delete(meta, "annotations")
