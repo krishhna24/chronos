@@ -21,7 +21,7 @@ Clients resolve aliases using `GET /api/v1/resources`.
 | --- | --- | --- |
 | `GET /api/v1/resources` | – | `ResourcesResponse`: supported types with coverage intervals, retention horizon, server time |
 | `GET /api/v1/state` | `resource`, `namespace` (namespaced types), `name`, `at` (default now) | `ObjectState` |
-| `GET /api/v1/list` | `resource`, `namespace` (empty = all), `at` (default now), `labelSelector` (Kubernetes syntax), `includeDeleted` (bool, default false) | `ListResponse`. Items are objects with existence `present` (observed) or `unknown` (gap, last known). With `includeDeleted`, keys whose latest record is a delete are included with `absent` when coverage is `observed`, or `unknown` (version only, no object) during a gap. Sorted by namespace, name. |
+| `GET /api/v1/list` | `resource`, `namespace` (empty = all), `at` (default now), `labelSelector` (Kubernetes syntax), `includeDeleted` (bool, default false), `limit` (1–5000, default 500), `continue` (opaque token from the previous page; `at` must then be given explicitly) | `ListResponse`. Items are objects with existence `present` (observed) or `unknown` (gap, last known). With `includeDeleted`, keys whose latest record is a delete are included with `absent` when coverage is `observed`, or `unknown` (version only, no object) during a gap. Sorted by namespace, name. `continue` is set when more items exist. |
 | `GET /api/v1/diff` | `resource`, `namespace`, `name`, `from`, `to` (from < to) | `DiffResponse` |
 | `GET /api/v1/history` | `resource`, `namespace`, `name`, `from`, `to` (default: horizon..now), `limit` (1–10000, default 1000) | `HistoryResponse`; `coverage` lists only intervals overlapping [from, to] |
 | `GET /api/v1/changes` | `from`, `to` (required), `resource`, `namespace`, `limit` (default 1000, max 10000) | `ChangesResponse`, Seq order |
@@ -33,3 +33,7 @@ Semantics of `coverage` and `existence`: see ADR 0004.
 Diff rendering: both sides are rendered as YAML with keys sorted; the
 `diff` field is a unified diff with headers `--- <from RFC3339>` and
 `+++ <to RFC3339>`. A side whose existence is not `present` renders as empty.
+
+Resource limits: the server bounds concurrent `/list`, `/history`,
+`/changes` and `/diff` requests; when the bound is reached it answers
+`503 unavailable` instead of queueing without limit.
