@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/krishhna24/chronos/internal/api"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files in testdata/golden")
@@ -228,5 +230,49 @@ func TestThroughServiceProxy(t *testing.T) {
 	r = runCLI(t, runOpts{env: map[string]string{"CHRONOS_NAMESPACE": "Bad_NS"}}, "--kubeconfig", writeTLSKubeconfig(t, api, "secret-token"), "14:01", "get", "pods")
 	if r.code == 0 || !strings.Contains(r.stderr, "invalid --chronos-namespace") {
 		t.Errorf("invalid namespace: code %d stderr %q", r.code, r.stderr)
+	}
+}
+
+// TestListFollowsContinue serves /list in pages of one item and checks the
+// CLI asks for every page at the same instant and prints all items.
+func TestListFollowsContinue(t *testing.T) {
+	chronos := newChronos(t).Config.Handler
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/list" {
+			chronos.ServeHTTP(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		r2 := r.Clone(r.Context())
+		q := r2.URL.Query()
+		q.Del("continue")
+		r2.URL.RawQuery = q.Encode()
+		chronos.ServeHTTP(rec, r2)
+		var full api.ListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &full); err != nil {
+			t.Fatal(err)
+		}
+		i := 0
+		if c := r.URL.Query().Get("continue"); c != "" {
+			if _, err := fmt.Sscanf(c, "page-%d", &i); err != nil {
+				t.Errorf("bad continue token %q", c)
+			}
+		}
+		pages = append(pages, r.URL.Query().Get("at"))
+		page := full
+		page.Items = full.Items[i : i+1]
+		if i+1 < len(full.Items) {
+			page.Continue = fmt.Sprintf("page-%d", i+1)
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	}))
+	t.Cleanup(srv.Close)
+	r := runCLI(t, runOpts{}, "--server", srv.URL, "--kubeconfig", writeKubeconfig(t, "https://127.0.0.1:1", "ns"), "14:01", "get", "pods", "-A", "-o", "name")
+	if r.code != 0 || r.stdout != "pod/db-0\npod/web-1\npod/web-2\n" {
+		t.Fatalf("paged get: code %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
+	}
+	if len(pages) != 3 || pages[0] != pages[1] || pages[1] != pages[2] {
+		t.Errorf("pages requested at %v, want 3 pages at one instant", pages)
 	}
 }
