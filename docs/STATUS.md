@@ -10,9 +10,11 @@ Updated: 2026-11-25
   storetest conformance suite, `internal/api` wire types, `docs/api.md`.
 - [ ] Phase 3 — Core implementation (parallel workstreams below)
 - [x] Phase 4 — Integration: all components wired; pebble default.
-- [~] Phase 5 — Adversarial verification: one independent review round
-  (13 findings, all fixed with regression tests); restart/crash verified;
-  chaos and scale testing still to do.
+- [~] Phase 5 — Adversarial verification: two independent review rounds
+  (all findings fixed with regression tests); scale + 12 chaos scenarios
+  run (docs/performance.md, docs/reliability.md): 10 PASS, 2 FAIL (D1
+  process stall, D2 unrecordable coverage loss) -> ADR 0007, fixes in
+  progress.
 - [ ] Phase 5 — Adversarial verification
 - [ ] Phase 6 — Rebuild and hardening
 - [ ] Phase 7 — Release readiness (image/chart/CI/install docs exist; blocked on pebble + review fixes)
@@ -84,6 +86,22 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 | 6 | low | Pebble background Fatalf crashes process; doc overclaims | storage | doc corrected (restart + WAL replay is the recovery) |
 | 7 | low | Chart args unquoted; large ints render as floats | devops | fixed (44a65f5) |
 | 8 | low | Close-after-timeout returns nil; qps/burst/interval unvalidated | storage + orchestrator | fixed |
+
+## Scale and chaos (2026-11-25, docs/performance.md, docs/reliability.md)
+- 13.9k-16.7k objects, 53,640 updates at 100-200/s: 0 lost, 0 out of order.
+- Reconstruction (`state`) p95 0.55 ms; diff p95 1.56 ms; list page (500,
+  all namespaces) p95 62 ms; single-namespace page p95 138 ms (investigating).
+- RSS 160 MiB idle, 374 MiB peak; 246 B/record on disk.
+- Chaos FAIL D1 (SIGSTOP 120 s: late backlog recorded as observed) and D2
+  (disk full: API answered observed while End could not be written) ->
+  ADR 0007 (watchdog + live coverage overlay), assigned to collector/query.
+
+## CI on GitHub (first run 2026-11-25, run 45581848591)
+- Pass: web, Docker image build, Helm lint, make lint (pinned, checksum-verified golangci-lint).
+- Fail: go test -race — TestCrashDurability (test harness dropped unread
+  acks; fixed 65a8abb) and TestRestartAfterCleanShutdown (real shutdown
+  race, safe direction: End may land at last event instead of shutdown
+  time; assigned to collector). Integration-on-kind job skipped (depends on Go job).
 
 ## Known defects / follow-ups
 - Cluster-wide List at 10k live + 30k dead keys takes ~580 ms (target 100 ms);
