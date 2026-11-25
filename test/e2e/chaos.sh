@@ -23,7 +23,7 @@
 # Every scenario uses the perf-chaos-0 namespace (300 ConfigMaps) for its
 # writes and deletes it at the end. The control plane is always unpaused
 # by a trap.
-# shellcheck source=lib.sh
+# shellcheck source=SCRIPTDIR/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SCENARIO=${1:?scenario}

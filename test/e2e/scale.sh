@@ -10,7 +10,7 @@
 #        STORM_DURATION (3m) SKIP_POPULATE=1 KEEP=1 (leave perf-* namespaces)
 # Output goes to stdout; tee it. Pending Pods use a nodeSelector no node
 # matches, so the dataset costs apiserver/etcd memory but no CPU.
-# shellcheck source=lib.sh
+# shellcheck source=SCRIPTDIR/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CONFIGMAPS=${CONFIGMAPS:-7000}
