@@ -76,14 +76,14 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 ## Independent review round 2 (2026-11-25) — remediation
 | # | Severity | Finding | Owner | Status |
 | --- | --- | --- | --- | --- |
-| 1 | high | SST corruption panics readers (Fatalf) and leaks iterators; Close then panics | storage | fixing |
-| 2 | medium | Compact ignores ctx on hung commit; main waited for retention before Store.Close | storage + orchestrator | shutdown order fixed (this commit); store ctx handling in progress |
-| 3 | medium | Compact builds one unbounded batch (OOM risk after long outage) | storage | fixing (chunked compaction) |
+| 1 | high | SST corruption panics readers (Fatalf) and leaks iterators; Close then panics | storage | fixed: ErrCorrupt naming the table, deferred closes, recover at View boundary |
+| 2 | medium | Compact ignores ctx on hung commit; main waited for retention before Store.Close | storage + orchestrator | fixed: shutdown order (55765f8); Compact/Write honour ctx and poison on ambiguous outcome (collector writes use a non-signal context, so SIGTERM cannot poison) |
+| 3 | medium | Compact builds one unbounded batch (OOM risk after long outage) | storage | fixed: chunked (≤50k keys/64 MB), horizon written first + pending marker, crash-between-chunks test; peak heap 108→34 MB on 300k records |
 | 4 | medium | Actions/base images pinned by tag; curl\|sh lint install; no SBOM/provenance | devops | fixed (44a65f5): SHA-pinned actions, digest-pinned bases, checksum-verified golangci-lint and pnpm, SBOM+provenance; workflows still never run on GitHub |
 | 5 | low-med | RBAC grants secrets list/watch even when secrets not recorded | devops | fixed (44a65f5) + drift test chart vs Builtin (98103cc) |
-| 6 | low | Pebble background Fatalf crashes process; doc overclaims | storage | fixing (doc) |
+| 6 | low | Pebble background Fatalf crashes process; doc overclaims | storage | doc corrected (restart + WAL replay is the recovery) |
 | 7 | low | Chart args unquoted; large ints render as floats | devops | fixed (44a65f5) |
-| 8 | low | Close-after-timeout returns nil; qps/burst/interval unvalidated | storage + orchestrator | flags fixed (this commit) |
+| 8 | low | Close-after-timeout returns nil; qps/burst/interval unvalidated | storage + orchestrator | fixed |
 
 ## Known defects / follow-ups
 - Cluster-wide List at 10k live + 30k dead keys takes ~580 ms (target 100 ms);
