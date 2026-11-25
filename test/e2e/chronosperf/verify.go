@@ -25,6 +25,7 @@ func runVerify(args []string) error {
 	server := fs.String("server", "http://127.0.0.1:18080", "Chronos base URL")
 	ns := fs.String("namespace", "", "namespace (empty: all namespaces)")
 	timeout := fs.Duration("timeout", 20*time.Second, "keep retrying until this long")
+	allowGap := fs.Bool("allow-gap", false, "accept differences while coverage is not observed (Chronos is then saying it does not know); fail only if it claims observed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -92,6 +93,10 @@ func runVerify(args []string) error {
 				fmt.Println("verify:", examples[i])
 			}
 			if missing+extra+stale > 0 {
+				if *allowGap && cov.State != api.CoverageObserved {
+					fmt.Printf("verify: differences are reported under coverage %q, not as observed: OK\n", cov.State)
+					return nil
+				}
 				return fmt.Errorf("chronos state differs from the cluster")
 			}
 			return nil

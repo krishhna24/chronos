@@ -1,7 +1,13 @@
 package main
 
 import (
+	"context"
+	"log/slog"
+
 	"github.com/krishhna24/chronos/internal/collector"
+	"github.com/krishhna24/chronos/internal/model"
+	"github.com/krishhna24/chronos/internal/store"
+	"github.com/krishhna24/chronos/internal/store/memstore"
 	"testing"
 	"time"
 )
@@ -51,7 +57,7 @@ func TestLiveCoverage(t *testing.T) {
 	f := liveCoverage(fakeStatus{
 		{Resource: "v1/pods", LostAt: &lost},
 		{Resource: "v1/configmaps"},
-	})
+	}, &degradedState{})
 	if at, ok := f("v1/pods"); !ok || !at.Equal(lost) {
 		t.Errorf("pods: %v %v, want %v true", at, ok, lost)
 	}
@@ -60,5 +66,42 @@ func TestLiveCoverage(t *testing.T) {
 	}
 	if _, ok := f("v1/secrets"); ok {
 		t.Error("unknown resource reported lost")
+	}
+}
+
+func TestDegradedOverlay(t *testing.T) {
+	ctx := context.Background()
+	st := memstore.New()
+	t0 := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	rec := &model.Record{ObservedAt: t0.Add(time.Minute), Key: model.ObjectKey{Resource: "v1/pods", Namespace: "ns", Name: "a"},
+		UID: "u", Type: model.ChangeAdded, Origin: model.OriginWatch}
+	if err := st.Write(ctx, []store.Entry{{Record: rec}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetHeartbeat(ctx, t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	types, err := selectResources("pods,cm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &degradedState{}
+	earlier := t0.Add(30 * time.Second)
+	f := liveCoverage(fakeStatus{{Resource: "v1/configmaps", LostAt: &earlier}}, d)
+	if _, ok := f("v1/pods"); ok {
+		t.Fatal("lost before entering read-only mode")
+	}
+	d.enter(ctx, st, types, slog.New(slog.DiscardHandler))
+	// pods: max(heartbeat 9:02, latest record 9:01) = 9:02.
+	if at, ok := f("v1/pods"); !ok || !at.Equal(t0.Add(2*time.Minute)) {
+		t.Errorf("pods lost at %v %v, want heartbeat %v", at, ok, t0.Add(2*time.Minute))
+	}
+	// configmaps: the collector's earlier LostAt wins over the heartbeat.
+	if at, ok := f("v1/configmaps"); !ok || !at.Equal(earlier) {
+		t.Errorf("configmaps lost at %v %v, want %v", at, ok, earlier)
+	}
+	// A resource read-only mode never heard of is lost from the start.
+	if at, ok := f("v1/secrets"); !ok || !at.IsZero() {
+		t.Errorf("unknown resource: %v %v, want zero true", at, ok)
 	}
 }

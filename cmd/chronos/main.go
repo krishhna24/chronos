@@ -45,6 +45,7 @@ type config struct {
 	redact            string
 	secretAnnotations string
 	stallTimeout      time.Duration
+	degradedExitAfter time.Duration
 	keepManagedFields bool
 	logLevel          string
 	logFormat         string
@@ -66,6 +67,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&c.redact, "redact-annotations", "", "comma-separated annotation keys removed from every object before storing")
 	fs.StringVar(&c.secretAnnotations, "secret-annotation-allowlist", "", "comma-separated annotation keys kept on secrets; all other secret annotations are dropped because they can carry credentials")
 	fs.DurationVar(&c.stallTimeout, "stall-timeout", 5*time.Second, "if a received change waits longer than this for the store, coverage of its type ends and the type is relisted, so recorded times are never later than this")
+	fs.DurationVar(&c.degradedExitAfter, "degraded-exit-after", 10*time.Minute, "after the store stops accepting writes (e.g. disk full), keep serving history read-only for this long, then exit so the pod restarts; 0 exits immediately")
 	fs.BoolVar(&c.keepManagedFields, "keep-managed-fields", false, "store metadata.managedFields (large; never kept for secrets)")
 	fs.StringVar(&c.logLevel, "log-level", "info", "debug, info, warn or error")
 	fs.StringVar(&c.logFormat, "log-format", "json", "json or text")
@@ -77,6 +79,9 @@ func parseFlags(args []string) (config, error) {
 	}
 	if c.retention < time.Hour {
 		return c, fmt.Errorf("--retention must be at least 1h, got %s", c.retention)
+	}
+	if c.degradedExitAfter < 0 {
+		return c, fmt.Errorf("--degraded-exit-after must not be negative")
 	}
 	if c.stallTimeout <= 0 {
 		return c, fmt.Errorf("--stall-timeout must be positive")
@@ -231,7 +236,8 @@ func run(args []string) error {
 
 	// ADR 0007: a continuity loss the collector could not yet persist
 	// (store unwritable, process stall) is shown as a gap immediately.
-	engine := query.New(st, clk, query.WithLiveCoverage(liveCoverage(col)))
+	degraded := &degradedState{}
+	engine := query.New(st, clk, query.WithLiveCoverage(liveCoverage(col, degraded)))
 	var webFS = web.FS()
 	if !web.Built() {
 		log.Warn("dashboard assets not built; serving placeholder page (run make web)")
@@ -274,7 +280,25 @@ func run(args []string) error {
 	case <-ctx.Done():
 		log.Info("shutting down")
 	case runErr = <-errc:
-		log.Error("fatal error, shutting down", "err", runErr)
+		if cfg.degradedExitAfter > 0 && errors.Is(runErr, store.ErrClosed) && ctx.Err() == nil {
+			// The store refused writes (poisoned after an ambiguous
+			// commit failure, e.g. disk full). History up to the loss is
+			// still valid, so keep serving it read-only, with everything
+			// after the loss reported as a gap, then exit so Kubernetes
+			// restarts us and recovery can be attempted.
+			degraded.enter(ctx, st, types, log)
+			log.Error("store unwritable; serving history read-only", "err", runErr, "exitAfter", cfg.degradedExitAfter)
+			select {
+			case <-ctx.Done():
+				log.Info("shutting down")
+			case <-clk.After(cfg.degradedExitAfter):
+				log.Error("read-only period over, exiting so the pod restarts")
+			case err := <-errc:
+				log.Error("fatal error, shutting down", "err", err)
+			}
+		} else {
+			log.Error("fatal error, shutting down", "err", runErr)
+		}
 	}
 	stop()
 	shutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -288,18 +312,73 @@ func run(args []string) error {
 	return runErr
 }
 
-// liveCoverage adapts the collector's in-memory loss state to the query
-// overlay. It can only turn observed answers into gaps.
-func liveCoverage(col interface {
-	Status() []collector.ResourceStatus
-}) query.LiveCoverage {
-	return func(resource string) (time.Time, bool) {
-		for _, s := range col.Status() {
-			if s.Resource == resource && s.LostAt != nil {
-				return *s.LostAt, true
+// degradedState records, per resource, when continuity was lost because
+// the store stopped accepting writes. Set once; read by the overlay.
+type degradedState struct {
+	mu     sync.RWMutex
+	lostAt map[string]time.Time
+}
+
+// enter computes each resource's loss bound the same way crash recovery
+// does (ADR 0004): everything up to max(last heartbeat, latest record) is
+// durable, so continuity is only claimed up to that point.
+func (d *degradedState) enter(ctx context.Context, st store.Store, types []resources.Type, log *slog.Logger) {
+	hb, err := st.Heartbeat(ctx)
+	if err != nil {
+		log.Error("reading heartbeat for read-only mode", "err", err)
+	}
+	m := map[string]time.Time{}
+	v, err := st.View(ctx)
+	if err != nil {
+		// Without a view, fall back to the heartbeat for every resource;
+		// zero time means "lost since the beginning", the safest answer.
+		log.Error("opening view for read-only mode", "err", err)
+	}
+	for _, t := range types {
+		at := hb
+		if v != nil {
+			if lr, err := v.LatestRecordTime(ctx, t.ID()); err == nil && lr.After(at) {
+				at = lr
 			}
 		}
+		m[t.ID()] = at
+	}
+	if v != nil {
+		_ = v.Close()
+	}
+	d.mu.Lock()
+	d.lostAt = m
+	d.mu.Unlock()
+}
+
+func (d *degradedState) get(resource string) (time.Time, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.lostAt == nil {
 		return time.Time{}, false
+	}
+	at, ok := d.lostAt[resource]
+	if !ok {
+		return time.Time{}, true
+	}
+	return at, true
+}
+
+// liveCoverage adapts the collector's in-memory loss state, and the
+// read-only state after the store stopped accepting writes, to the query
+// overlay. It can only turn observed answers into gaps; when both report a
+// loss the earlier one wins.
+func liveCoverage(col interface {
+	Status() []collector.ResourceStatus
+}, degraded *degradedState) query.LiveCoverage {
+	return func(resource string) (time.Time, bool) {
+		lost, ok := degraded.get(resource)
+		for _, s := range col.Status() {
+			if s.Resource == resource && s.LostAt != nil && (!ok || s.LostAt.Before(lost)) {
+				lost, ok = *s.LostAt, true
+			}
+		}
+		return lost, ok
 	}
 }
 

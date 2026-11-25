@@ -280,7 +280,10 @@ scenario_disk_full() {
   if curl -fsS "$srv/healthz" >/dev/null 2>&1; then
     SERVER=$srv coverage v1/configmaps
     perf_nokube lag -server "$srv" -in "$csv" || echo "LAG CHECK FAILED"
-    perf verify -server "$srv" -namespace perf-chaos-0 || echo "VERIFY FAILED"
+    # Read-only mode (ADR 0007): the store cannot write, so Chronos stays
+    # behind the cluster until the pod restarts; that is correct as long
+    # as it reports a gap rather than observed.
+    perf verify -allow-gap -server "$srv" -namespace perf-chaos-0 || echo "VERIFY FAILED"
   fi
   docker logs chronos-diskfull >"$WORK/diskfull.log" 2>&1 || true
   warnings "$WORK/diskfull.log" 25
