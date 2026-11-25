@@ -51,7 +51,10 @@ setup_ns() {
 
 # storm_bg RATE SECONDS CSV: storm on the chaos namespace in the background.
 storm_bg() {
-  perf storm "${chaos_dims[@]}" -rate "$1" -duration "$2s" -out "$3" >"$3.out" 2>&1 &
+  # Run the binary itself in the background (not the perf function, which
+  # would background a subshell) so the trap's kill reaches the storm.
+  "$PERF_BIN" storm -kubeconfig "$KUBECONFIG_FILE" -context "$CONTEXT" \
+    "${chaos_dims[@]}" -rate "$1" -duration "$2s" -out "$3" >"$3.out" 2>&1 &
   STORM_PID=$!
 }
 storm_wait() { wait "$STORM_PID" || true; STORM_PID=; tail -2 "$1.out"; }
@@ -189,7 +192,10 @@ scenario_crash() {
 }
 
 pf_start() { # port-forward the in-cluster service to $PORT
-  k -n chronos port-forward svc/chronos "$PORT:http" >"$WORK/pf.log" 2>&1 &
+  # kubectl itself, not the k function: a backgrounded function is a
+  # subshell, and killing it would leave the port-forward running.
+  kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n chronos \
+    port-forward svc/chronos "$PORT:http" >"$WORK/pf.log" 2>&1 &
   PF_PID=$!
   for _ in $(seq 50); do curl -fsS "$SERVER/readyz" >/dev/null 2>&1 && return 0; sleep 0.2; done
   echo "port-forward not ready" >&2; return 1
@@ -203,7 +209,12 @@ scenario_incluster_kill() {
   sleep 40
   log "kubectl delete pod chronos-0 --grace-period=0 --force"
   date -u +%FT%T.%NZ
+  local old
+  old=$(k -n chronos get pod chronos-0 -o jsonpath='{.metadata.uid}')
   k -n chronos delete pod chronos-0 --grace-period=0 --force 2>&1 | tail -1
+  # The StatefulSet recreates the pod; wait has nothing to watch until then.
+  until [[ "$(k -n chronos get pod chronos-0 -o jsonpath='{.metadata.uid}' 2>/dev/null)" =~ ^.+$ &&
+    "$(k -n chronos get pod chronos-0 -o jsonpath='{.metadata.uid}' 2>/dev/null)" != "$old" ]]; do sleep 0.5; done
   k -n chronos wait --for=condition=Ready pod/chronos-0 --timeout=180s
   date -u +%FT%T.%NZ
   storm_wait "$csv"
@@ -247,10 +258,13 @@ scenario_disk_full() {
   log "fill the tmpfs"
   docker exec chronos-diskfull sh -c 'dd if=/dev/zero of=/data/filler bs=64k 2>&1 | tail -1; df -k /data | tail -1'
   date -u +%FT%T.%NZ
-  storm_bg 20 60 "$csv"
+  storm_bg "${DISK_RATE:-100}" "${DISK_SECONDS:-120}" "$csv"
   storm_wait "$csv"
   log "while full: logs, coverage, and what queries say"
-  docker logs chronos-diskfull 2>&1 | grep -E '"level":"(WARN|ERROR)"|panic|fatal' | cut -c1-400 | sort | uniq -c | sort -rn | head -12
+  # Count distinct warning/error messages (file numbers and times removed).
+  docker logs chronos-diskfull 2>&1 | grep -E '"level":"(WARN|ERROR)"|panic|fatal' |
+    jq -r '"\(.level) \(.msg) \(.err // "")"' 2>/dev/null | sed -E 's/[0-9]{6}\.(sst|log)/NNNNNN.\1/g' |
+    cut -c1-300 | sort | uniq -c | sort -rn | head -15 || true
   docker ps -a --filter name=chronos-diskfull --format '{{.Status}}'
   if curl -fsS "$srv/healthz" >/dev/null 2>&1; then
     SERVER=$srv coverage v1/configmaps
@@ -261,7 +275,7 @@ scenario_disk_full() {
   log "free the space"
   docker exec chronos-diskfull rm -f /data/filler 2>/dev/null || echo "container gone; restarting it on the same tmpfs is impossible (tmpfs is lost)"
   date -u +%FT%T.%NZ
-  sleep 45
+  sleep "${RECOVER_WAIT:-60}"
   docker ps -a --filter name=chronos-diskfull --format '{{.Status}}'
   if curl -fsS "$srv/healthz" >/dev/null 2>&1; then
     SERVER=$srv coverage v1/configmaps
