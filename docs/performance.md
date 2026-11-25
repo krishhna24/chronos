@@ -107,11 +107,16 @@ server's heavy-request bound is also 8, and no request got a 503.
   listings, each building about 28 MB of JSON. Warm restart is the
   second largest consumer (320 MiB), because `loadKnown`
   (`internal/collector/writer.go`) re-normalizes every stored object.
-- **Namespace-scoped list page is slower than a cluster-wide page**
-  (p95 138 ms vs 62 ms for the same 500-item page size and the same
-  body size). I did not investigate why. A likely starting point is the
-  namespace path in `internal/query/list.go` or the store's List with
-  `Namespace` set.
+- **Namespace-scoped list page looked slower than a cluster-wide page**
+  (p95 138 ms vs 62 ms). *Follow-up (2026-11-25): not a namespace cost.*
+  The two scenarios were not comparable: `list-ns-page500-cm` picks a
+  random namespace per request while `list-all-page500-cm` repeats the
+  same first page, so only the former missed Pebble's block cache. In
+  process, with equal access patterns, a namespace page is as fast as or
+  faster than a cluster-wide one (`BenchmarkPebbleListPage`,
+  internal/query). The profiling did find a real cost: the store's
+  snapshot-manifest List path scans every change since the last
+  manifest on every page; that is being fixed in pebblestore.
 - **Store size.** The 200/s storm shrank the directory (−1.0 MB)
   because Pebble's LSM compaction ran during it, so the per-write
   delta is only meaningful over the whole store. That is why the
@@ -140,8 +145,10 @@ one 13.9k-object LIST at startup.
   and 53.6k updates recorded with no loss.
 - **Sub-100 ms reconstruction: met for object reconstruction.** `state`
   p95 was 0.55 ms (1.7 ms with 8 clients), `diff` p95 1.6 ms. One
-  500-item list page is under 100 ms cluster-wide (p95 62 ms) but **not**
-  within a namespace (p95 138 ms). A complete 7k-item list is 565 ms and
+  500-item list page measured p95 62 ms (repeated first page) and
+  138 ms (random namespace, mostly cache misses; see the follow-up above),
+  so the 100 ms target holds only for cached pages until the manifest
+  path fix lands and the benchmark is rerun with comparable scenarios. A complete 7k-item list is 565 ms and
   depends on paging, as STATUS.md already records.
 
 ## Reproducing
