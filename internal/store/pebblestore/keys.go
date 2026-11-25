@@ -27,6 +27,9 @@ var (
 	keyState     = []byte{tabMeta, 's', 't', 'a', 't', 'e'}
 	keyHorizon   = []byte{tabMeta, 'h', 'o', 'r', 'i', 'z', 'o', 'n'}
 	keyHeartbeat = []byte{tabMeta, 'h', 'e', 'a', 'r', 't', 'b', 'e', 'a', 't'}
+	// keyCompacting holds the horizon of a compaction that has started but
+	// not finished (see Compact); absent otherwise.
+	keyCompacting = []byte{tabMeta, 'c', 'o', 'm', 'p', 'a', 'c', 't', 'i', 'n', 'g'}
 )
 
 // timeLen is the size of an encoded timestamp: 8 bytes of seconds since the

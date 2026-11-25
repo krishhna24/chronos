@@ -48,6 +48,7 @@ var (
 )
 
 type diffHarness struct {
+	seed   uint64
 	t      *testing.T
 	r      *rand.Rand
 	dir    string
@@ -60,6 +61,17 @@ type diffHarness struct {
 	stats  map[string]int
 }
 
+// open opens the pebble side with a tiny compaction chunk size (varying
+// by seed) so multi-batch compactions are exercised.
+func (h *diffHarness) open() *Store {
+	h.t.Helper()
+	s, err := Open(h.dir, Options{Logger: testLogger(), SnapshotInterval: -1, compactChunkDeletes: 1 + int(h.seed%7)})
+	if err != nil {
+		h.t.Fatalf("Open: %v", err)
+	}
+	return s
+}
+
 type viewPair struct {
 	mem, peb store.View
 	label    string
@@ -67,6 +79,7 @@ type viewPair struct {
 
 func runDifferential(t *testing.T, seed uint64, ops int) {
 	h := &diffHarness{
+		seed:  seed,
 		t:     t,
 		r:     newRand(seed),
 		dir:   t.TempDir(),
@@ -75,7 +88,7 @@ func runDifferential(t *testing.T, seed uint64, ops int) {
 		stats: map[string]int{},
 	}
 	h.cursor = h.t0
-	h.peb = openTest(t, h.dir)
+	h.peb = h.open()
 	t.Cleanup(func() {
 		h.closeViews()
 		_ = h.peb.Close()
@@ -269,7 +282,7 @@ func (h *diffHarness) reopen(i int) {
 	if err := h.peb.Close(); err != nil {
 		h.t.Fatalf("op %d: Close: %v", i, err)
 	}
-	h.peb = openTest(h.t, h.dir)
+	h.peb = h.open()
 	h.stats["reopen"]++
 	ctx := context.Background()
 	m, _ := h.mem.Heartbeat(ctx)

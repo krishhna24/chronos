@@ -37,6 +37,12 @@ func (s *Store) Snapshot(ctx context.Context) error {
 
 	s.mu.Lock()
 	at, lastSeq, horizon, prev := s.lastTime, s.seq, s.horizon, s.lastManifest
+	if !s.pending.IsZero() {
+		// An interrupted compaction may still remove records a manifest
+		// would name; wait until Compact has finished it.
+		s.mu.Unlock()
+		return nil
+	}
 	resources := slices.Sorted(maps.Keys(s.lastRec))
 	var snap *pebble.Snapshot
 	if !at.IsZero() && at.After(prev) && !at.Before(horizon) {
@@ -98,7 +104,7 @@ func (s *Store) Snapshot(ctx context.Context) error {
 	}
 	size := b.Len()
 	owned = false
-	if err := s.commitWait(b, "snapshot manifest commit"); err != nil {
+	if err := s.commitWait(ctx, b, "snapshot manifest commit"); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -151,13 +157,14 @@ func compareEntry(a, b listEntry) int {
 // manifest (none, older than the horizon, or failing validation); the
 // caller then uses the scan path.
 func (v *view) loadManifest(ctx context.Context, opts store.ListOptions) (h *manifestHeader, es []listEntry, ok bool, err error) {
-	it, err := v.snap.NewIterWithContext(ctx, &pebble.IterOptions{
+	it, err := newIter(ctx, v.snap, &pebble.IterOptions{
 		LowerBound: []byte{tabManifest},
 		UpperBound: atOrBefore([]byte{tabManifest}, opts.At),
 	})
 	if err != nil {
 		return nil, nil, false, err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	if !it.Last() {
 		return nil, nil, false, closeIter(it)
 	}
@@ -237,18 +244,21 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 	// delete). If the manifest was built at the current horizon, its
 	// entries already reflect that compaction and any such delete was
 	// written afterwards, so it is real.
-	compactedSince := v.horizon.After(h.builtHorizon)
+	// Also while a compaction is pending in this view's snapshot: it may
+	// have removed some of those keys already and not others.
+	compactedSince := v.horizon.After(h.builtHorizon) || !v.pending.IsZero()
 
 	// Keys changed in (S, At], with their latest change in that window.
 	window := map[model.ObjectKey]listEntry{}
 	if opts.At.After(s) {
-		it, err := v.snap.NewIterWithContext(ctx, &pebble.IterOptions{
+		it, err := newIter(ctx, v.snap, &pebble.IterOptions{
 			LowerBound: atOrBefore([]byte{tabIndex}, s),
 			UpperBound: atOrBefore([]byte{tabIndex}, opts.At),
 		})
 		if err != nil {
 			return true, err
 		}
+		defer func(it *iter) { _ = it.Close() }(it)
 		n := 0
 		for ok := it.First(); ok; ok = it.Next() {
 			if n++; n%ctxCheckEvery == 0 {
@@ -279,12 +289,12 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 	changed := slices.SortedFunc(maps.Values(window), compareEntry)
 
 	emit := func(e listEntry) error {
-		if compactedSince && e.fromMan && e.deleted && e.at.Before(v.horizon) {
-			return nil
-		}
 		k := model.ObjectKey{Resource: opts.Resource, Namespace: e.ns, Name: e.name}
 		vk := versionKey(k, e.at)
 		found, err := getVersion(v.snap, vk, fn)
+		if err == nil && !found && compactedSince && e.fromMan && e.deleted && e.at.Before(v.horizon) {
+			return nil // removed with its key by compaction
+		}
 		if err == nil && !found {
 			err = corruptf(vk, "listed by snapshot manifest or time index but missing")
 		}

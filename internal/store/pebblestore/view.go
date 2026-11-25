@@ -28,6 +28,7 @@ type view struct {
 	s       *Store
 	snap    *pebble.Snapshot
 	horizon time.Time
+	pending time.Time // horizon of an unfinished compaction in snap
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -57,6 +58,17 @@ func newView(s *Store) (*view, error) {
 			_ = snap.Close()
 			return nil, err
 		}
+	}
+	if val, closer, err := snap.Get(keyCompacting); err == nil {
+		v.pending, err = decodeTimeValue(keyCompacting, val)
+		_ = closer.Close()
+		if err != nil {
+			_ = snap.Close()
+			return nil, err
+		}
+	} else if !errors.Is(err, pebble.ErrNotFound) {
+		_ = snap.Close()
+		return nil, mapPebbleErr(err)
 	}
 	return v, nil
 }
@@ -108,7 +120,7 @@ func (v *view) Close() error {
 
 func (v *view) Horizon() time.Time { return v.horizon }
 
-func iterValue(it *pebble.Iterator) ([]byte, error) {
+func iterValue(it *iter) ([]byte, error) {
 	val, err := it.ValueAndErr()
 	if err != nil {
 		return nil, fmt.Errorf("pebblestore: read %s: %w", describeKey(it.Key()), err)
@@ -116,16 +128,13 @@ func iterValue(it *pebble.Iterator) ([]byte, error) {
 	return val, nil
 }
 
-func (v *view) Get(ctx context.Context, key model.ObjectKey, at time.Time) (model.Record, bool, error) {
-	if err := v.begin(ctx); err != nil {
-		return model.Record{}, false, err
-	}
-	defer v.end()
+func (v *view) get(ctx context.Context, key model.ObjectKey, at time.Time) (model.Record, bool, error) {
 	obj := objectPrefix(key)
-	it, err := v.snap.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: obj, UpperBound: prefixEnd(obj)})
+	it, err := newIter(ctx, v.snap, &pebble.IterOptions{LowerBound: obj, UpperBound: prefixEnd(obj)})
 	if err != nil {
 		return model.Record{}, false, err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	if !it.SeekLT(atOrBefore(obj, at)) {
 		return model.Record{}, false, closeIter(it)
 	}
@@ -153,10 +162,11 @@ func (v *view) Get(ctx context.Context, key model.ObjectKey, at time.Time) (mode
 // >= start (nil: the beginning of prefix). It costs two seeks per object
 // ever seen (within retention), however many versions each has.
 func scanLatest(ctx context.Context, r pebbleReader, prefix, start []byte, at time.Time, fn func(key, val []byte) error) error {
-	it, err := r.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+	it, err := newIter(ctx, r, &pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	n := 0
 	if bytes.Compare(start, prefix) < 0 {
 		start = prefix
@@ -221,11 +231,7 @@ func listPrefix(opts store.ListOptions) []byte {
 	return versionResourcePrefix(opts.Resource)
 }
 
-func (v *view) List(ctx context.Context, opts store.ListOptions, fn func(model.Record) error) error {
-	if err := v.begin(ctx); err != nil {
-		return err
-	}
-	defer v.end()
+func (v *view) list(ctx context.Context, opts store.ListOptions, fn func(model.Record) error) error {
 	if done, err := v.listFromManifest(ctx, opts, fn); done {
 		v.s.stats.manifest.Add(1)
 		return err
@@ -245,22 +251,19 @@ func (v *view) listScan(ctx context.Context, opts store.ListOptions, fn func(mod
 	})
 }
 
-func (v *view) History(ctx context.Context, key model.ObjectKey, from, to time.Time, fn func(model.Record) error) error {
-	if err := v.begin(ctx); err != nil {
-		return err
-	}
-	defer v.end()
+func (v *view) history(ctx context.Context, key model.ObjectKey, from, to time.Time, fn func(model.Record) error) error {
 	if to.Before(from) {
 		return nil
 	}
 	obj := objectPrefix(key)
-	it, err := v.snap.NewIterWithContext(ctx, &pebble.IterOptions{
+	it, err := newIter(ctx, v.snap, &pebble.IterOptions{
 		LowerBound: appendTime(slices.Clone(obj), from),
 		UpperBound: atOrBefore(obj, to),
 	})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	n := 0
 	for ok := it.First(); ok; ok = it.Next() {
 		if n++; n%ctxCheckEvery == 0 {
@@ -302,21 +305,18 @@ func getVersion(r pebbleReader, key []byte, fn func(model.Record) error) (found 
 	return true, fn(rec)
 }
 
-func (v *view) Changes(ctx context.Context, opts store.ChangesOptions, fn func(model.Record) error) error {
-	if err := v.begin(ctx); err != nil {
-		return err
-	}
-	defer v.end()
+func (v *view) changes(ctx context.Context, opts store.ChangesOptions, fn func(model.Record) error) error {
 	if opts.To.Before(opts.From) {
 		return nil
 	}
-	it, err := v.snap.NewIterWithContext(ctx, &pebble.IterOptions{
+	it, err := newIter(ctx, v.snap, &pebble.IterOptions{
 		LowerBound: indexKey(opts.From),
 		UpperBound: atOrBefore([]byte{tabIndex}, opts.To),
 	})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	n, steps := 0, 0
 	for ok := it.First(); ok; ok = it.Next() {
 		if steps++; steps%ctxCheckEvery == 0 {
@@ -361,20 +361,17 @@ func (v *view) Changes(ctx context.Context, opts store.ChangesOptions, fn func(m
 	return closeIter(it)
 }
 
-func (v *view) Coverage(ctx context.Context, resource string) ([]model.CoverageEvent, error) {
-	if err := v.begin(ctx); err != nil {
-		return nil, err
-	}
-	defer v.end()
+func (v *view) coverage(ctx context.Context, resource string) ([]model.CoverageEvent, error) {
 	return readCoverage(ctx, v.snap, resource)
 }
 
 func readCoverage(ctx context.Context, r pebbleReader, resource string) ([]model.CoverageEvent, error) {
 	p := coveragePrefix(resource)
-	it, err := r.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: p, UpperBound: prefixEnd(p)})
+	it, err := newIter(ctx, r, &pebble.IterOptions{LowerBound: p, UpperBound: prefixEnd(p)})
 	if err != nil {
 		return nil, err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	var out []model.CoverageEvent
 	for ok := it.First(); ok; ok = it.Next() {
 		val, err := iterValue(it)
@@ -391,19 +388,16 @@ func readCoverage(ctx context.Context, r pebbleReader, resource string) ([]model
 	return out, closeIter(it)
 }
 
-func (v *view) Resources(ctx context.Context) ([]string, error) {
-	if err := v.begin(ctx); err != nil {
-		return nil, err
-	}
-	defer v.end()
+func (v *view) resources(ctx context.Context) ([]string, error) {
 	return readResources(ctx, v.snap)
 }
 
 func readResources(ctx context.Context, r pebbleReader) ([]string, error) {
-	it, err := r.NewIterWithContext(ctx, &pebble.IterOptions{LowerBound: []byte{tabCoverage}, UpperBound: []byte{tabCoverage + 1}})
+	it, err := newIter(ctx, r, &pebble.IterOptions{LowerBound: []byte{tabCoverage}, UpperBound: []byte{tabCoverage + 1}})
 	if err != nil {
 		return nil, err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	var out []string
 	for ok := it.First(); ok; {
 		res, _, err := decodeComponent(it.Key()[1:])
@@ -424,11 +418,7 @@ func readResources(ctx context.Context, r pebbleReader) ([]string, error) {
 // same batch and which Compact never deletes, so it equals the bound
 // CoverageEnd validation uses, survives reopen, and is consistent with
 // the rest of the view's snapshot.
-func (v *view) LatestRecordTime(ctx context.Context, resource string) (time.Time, error) {
-	if err := v.begin(ctx); err != nil {
-		return time.Time{}, err
-	}
-	defer v.end()
+func (v *view) latestRecordTime(ctx context.Context, resource string) (time.Time, error) {
 	k := lastRecKey(resource)
 	val, closer, err := v.snap.Get(k)
 	if errors.Is(err, pebble.ErrNotFound) {
@@ -439,4 +429,89 @@ func (v *view) LatestRecordTime(ctx context.Context, resource string) (time.Time
 	}
 	defer func() { _ = closer.Close() }()
 	return decodeTimeValue(k, val)
+}
+
+// Public View methods: each registers the call (so Close waits for it),
+// maps Pebble corruption errors to store.ErrCorrupt, and, as defence in
+// depth, turns a Pebble fatal raised on this goroutine into ErrCorrupt
+// instead of crashing the reader. Iterators are closed by defers inside
+// the implementations, so they are released on that path too.
+
+func (v *view) Get(ctx context.Context, key model.ObjectKey, at time.Time) (rec model.Record, ok bool, err error) {
+	if err = v.begin(ctx); err != nil {
+		return model.Record{}, false, err
+	}
+	defer v.done(&err)
+	rec, ok, err = v.get(ctx, key, at)
+	if err != nil {
+		return model.Record{}, false, err
+	}
+	return rec, ok, nil
+}
+
+func (v *view) List(ctx context.Context, opts store.ListOptions, fn func(model.Record) error) (err error) {
+	if err = v.begin(ctx); err != nil {
+		return err
+	}
+	defer v.done(&err)
+	return v.list(ctx, opts, fn)
+}
+
+func (v *view) History(ctx context.Context, key model.ObjectKey, from, to time.Time, fn func(model.Record) error) (err error) {
+	if err = v.begin(ctx); err != nil {
+		return err
+	}
+	defer v.done(&err)
+	return v.history(ctx, key, from, to, fn)
+}
+
+func (v *view) Changes(ctx context.Context, opts store.ChangesOptions, fn func(model.Record) error) (err error) {
+	if err = v.begin(ctx); err != nil {
+		return err
+	}
+	defer v.done(&err)
+	return v.changes(ctx, opts, fn)
+}
+
+func (v *view) Coverage(ctx context.Context, resource string) (cs []model.CoverageEvent, err error) {
+	if err = v.begin(ctx); err != nil {
+		return nil, err
+	}
+	defer v.done(&err)
+	return v.coverage(ctx, resource)
+}
+
+func (v *view) Resources(ctx context.Context) (rs []string, err error) {
+	if err = v.begin(ctx); err != nil {
+		return nil, err
+	}
+	defer v.done(&err)
+	return v.resources(ctx)
+}
+
+// LatestRecordTime implements store.View; see latestRecordTime.
+func (v *view) LatestRecordTime(ctx context.Context, resource string) (t time.Time, err error) {
+	if err = v.begin(ctx); err != nil {
+		return time.Time{}, err
+	}
+	defer v.done(&err)
+	return v.latestRecordTime(ctx, resource)
+}
+
+// done ends a call started with begin. It must be deferred directly so
+// recover sees a panic from the call. Callback errors pass through
+// unchanged (store.View contract): only Pebble corruption errors, which a
+// callback cannot produce, are rewrapped.
+func (v *view) done(errp *error) {
+	defer v.end()
+	if r := recover(); r != nil {
+		f, ok := r.(pebbleFatal)
+		if !ok {
+			panic(r)
+		}
+		v.s.log.Error("pebble fatal during a read; reporting corruption to the caller", "err", f.msg)
+		*errp = fmt.Errorf("%w: %s", store.ErrCorrupt, f.msg)
+		return
+	}
+	*errp = mapPebbleErr(*errp)
 }
