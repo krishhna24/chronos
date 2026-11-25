@@ -4,20 +4,21 @@ Updated: 2026-11-26
 
 ## Phase
 - [x] Phase 1 — Reconnaissance: local dir and GitHub repo
-  (krishhna24/chronos, private) were empty; no prior history. Starting from scratch.
-- [x] Phase 2 — Architecture and contracts (this commit): ADRs 0001–0006,
-  `internal/model`, `internal/store` contract, memstore reference store,
-  storetest conformance suite, `internal/api` wire types, `docs/api.md`.
-- [ ] Phase 3 — Core implementation (parallel workstreams below)
-- [x] Phase 4 — Integration: all components wired; pebble default.
-- [x] Phase 6 — Rebuild and hardening: every review/chaos defect fixed and re-verified; CI green.
+  (krishhna24/chronos, private) were empty; started from scratch.
+- [x] Phase 2 — Architecture and contracts: ADRs 0001–0007, `internal/model`,
+  `internal/store` contract + memstore + conformance suite, `internal/api`.
+- [x] Phase 3 — Core implementation: collector, pebblestore, query/API,
+  `kubectl at`, dashboard, packaging.
+- [x] Phase 4 — Integration: all components wired in `cmd/chronos`; pebble default.
 - [x] Phase 5 — Adversarial verification: two independent review rounds
   (all findings fixed with regression tests); scale + 12 chaos scenarios
   (docs/performance.md, docs/reliability.md); D1/D2 fixed per ADR 0007 and
-  re-tested (freeze: lag max 2m5s -> 1.6s with process-stall gap; disk
-  full: read-only with gap, LOST=0).
-- [ ] Phase 5 — Adversarial verification
-- [ ] Phase 7 — Release readiness: image, chart, install docs and green CI done; first tagged release (v0.1.0) not yet cut.
+  re-tested (freeze: lag max 2m5s -> 1.6s with a process-stall gap; disk
+  full: read-only with a gap, LOST=0).
+- [x] Phase 6 — Rebuild and hardening: every defect re-verified; CI green
+  on GitHub (run 45675248754).
+- [ ] Phase 7 — Release readiness: image, chart, install docs and green CI
+  done; first tagged release (v0.1.0) not yet cut.
 
 ## Environment
 Go 1.26.11, Node 26, pnpm 12, Docker 29, kind 0.33, kubectl 1.36,
