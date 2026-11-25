@@ -16,6 +16,9 @@ func TestParseFlags(t *testing.T) {
 	for _, bad := range [][]string{
 		{"--retention", "10m"},
 		{"--retention-interval", "0s"},
+		{"--retention-interval", "1s"},
+		{"--kube-api-qps", "-1"},
+		{"--kube-api-burst", "0"},
 		{"--nope"},
 	} {
 		if _, err := parseFlags(bad); err == nil {

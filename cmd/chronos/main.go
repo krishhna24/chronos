@@ -81,8 +81,11 @@ func parseFlags(args []string) (config, error) {
 	if c.stallTimeout <= 0 {
 		return c, fmt.Errorf("--stall-timeout must be positive")
 	}
-	if c.retentionInterval <= 0 {
-		return c, fmt.Errorf("--retention-interval must be positive")
+	if c.retentionInterval < time.Minute {
+		return c, fmt.Errorf("--retention-interval must be at least 1m, got %s", c.retentionInterval)
+	}
+	if c.qps <= 0 || c.burst <= 0 {
+		return c, fmt.Errorf("--kube-api-qps and --kube-api-burst must be positive")
 	}
 	return c, nil
 }
@@ -192,11 +195,17 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := st.Close(); err != nil {
-			log.Error("closing store", "err", err)
-		}
-	}()
+	// The store is closed explicitly during shutdown (see below); this
+	// covers the early-return paths before that.
+	var closeOnce sync.Once
+	closeStore := func() {
+		closeOnce.Do(func() {
+			if err := st.Close(); err != nil {
+				log.Error("closing store", "err", err)
+			}
+		})
+	}
+	defer closeStore()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -237,7 +246,11 @@ func run(args []string) error {
 	})
 	srv := server.NewHTTPServer(cfg.listen, handler)
 
-	var wg sync.WaitGroup
+	// Shutdown order matters: the collector and HTTP server must stop
+	// before the store closes (they write and read it), but retention must
+	// be waited for only after the close, because Store.Close is what
+	// releases a compaction stuck on a hung disk.
+	var wg, retention sync.WaitGroup
 	errc := make(chan error, 3)
 
 	wg.Go(func() {
@@ -246,7 +259,7 @@ func run(args []string) error {
 			errc <- fmt.Errorf("collector: %w", err)
 		}
 	})
-	wg.Go(func() { retentionLoop(ctx, st, clk, cfg, log.With("component", "retention")) })
+	retention.Go(func() { retentionLoop(ctx, st, clk, cfg, log.With("component", "retention")) })
 	wg.Go(func() {
 		log.Info("serving HTTP", "addr", cfg.listen)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -268,6 +281,8 @@ func run(args []string) error {
 		log.Error("http shutdown", "err", err)
 	}
 	wg.Wait()
+	closeStore()
+	retention.Wait()
 	return runErr
 }
 
