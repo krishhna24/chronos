@@ -394,6 +394,28 @@ type failingStore struct {
 
 var errDisk = errors.New("disk on fire")
 
+// block makes writes wait until the returned release is called. Release is
+// idempotent and also runs at test cleanup, so a failing assertion cannot
+// leave the writer stuck in Write (which would surface as "collector did
+// not stop", since shutdown then waits for ShutdownTimeout).
+func (f *failingStore) block(t *testing.T) (release func()) {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.gate = gate
+	f.mu.Unlock()
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			f.mu.Lock()
+			f.gate = nil
+			f.mu.Unlock()
+			close(gate)
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
 func (f *failingStore) Write(ctx context.Context, es []store.Entry) error {
 	f.writes.Add(1)
 	f.mu.Lock()

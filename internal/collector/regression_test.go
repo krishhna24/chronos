@@ -105,10 +105,7 @@ func TestRegressionShutdownUnderBackpressure(t *testing.T) {
 	})
 	w := srv.watcher(t)
 	waitJournal(t, fs, cmID, "Added/baseline ns/a ua", "Start")
-	gate := make(chan struct{})
-	fs.mu.Lock()
-	fs.gate = gate
-	fs.mu.Unlock()
+	release := fs.block(t)
 	const n = 20
 	for i := 1; i <= n; i++ {
 		w.Modify(srv.set(cm("ns", "a", "ua", strings.Repeat("x", i))))
@@ -117,10 +114,7 @@ func TestRegressionShutdownUnderBackpressure(t *testing.T) {
 	clk.SetTime(t0.Add(time.Minute))
 	h.cancel()
 	time.Sleep(100 * time.Millisecond)
-	fs.mu.Lock()
-	fs.gate = nil
-	fs.mu.Unlock()
-	close(gate)
+	release()
 	if err := <-h.done; err != nil {
 		t.Logf("Run: %v", err)
 	}
@@ -254,33 +248,31 @@ func TestRegressionStallEndsCoverage(t *testing.T) {
 	})
 	w := srv.watcher(t)
 	waitJournal(t, fs, cmID, "Added/baseline ns/a ua", "Start")
-	gate := make(chan struct{})
-	fs.mu.Lock()
-	fs.gate = gate
-	fs.mu.Unlock()
+	release := fs.block(t)
 	t1 := t0.Add(time.Second)
 	clk.SetTime(t1)
 	for i := 1; i <= 3; i++ { // writer busy, queue full, third blocks
 		w.Modify(srv.set(cm("ns", "a", "ua", strings.Repeat("x", i))))
 	}
+	// Wait until the third event (stamped t1) is the one waiting: the
+	// first is in the stuck writer and the second fills the queue. Waiting
+	// on src.waiting alone also matches the second event's brief put.
 	src := h.c.res[0].src
-	eventually(t, "reflector blocked on the queue", func() bool {
+	eventually(t, "third event blocked on the queue", func() bool {
 		src.mu.Lock()
 		defer src.mu.Unlock()
-		return src.waiting
+		return src.acceptedEvents == 2 && src.waiting
 	})
-	clk.Step(6 * time.Second) // the stall outlasts StallTimeout
+	// The stall timer is armed inside put, possibly after this point, so
+	// keep moving the clock until it has fired rather than stepping once.
 	// D2: the writer is stuck, so the End cannot be written yet, but the
 	// status already reports the loss.
 	eventually(t, "LostAt while the writer is stuck", func() bool {
+		clk.Step(time.Second)
 		s := status(h.c, cmID)
 		return s.LostAt != nil && s.LostAt.Equal(t1)
 	})
-	time.Sleep(20 * time.Millisecond)
-	fs.mu.Lock()
-	fs.gate = nil
-	fs.mu.Unlock()
-	close(gate)
+	release()
 	eventually(t, "relist after stall", func() bool {
 		cov := coverageOf(t, fs, cmID)
 		return len(cov) == 3
@@ -478,6 +470,18 @@ func TestRegressionWatchdogTickerDetectsFreeze(t *testing.T) {
 		cov := coverageOf(t, st, id)
 		if cov[1].Type != model.CoverageEnd || cov[1].Reason != reasonProcessStall || cov[1].At.After(t0.Add(4*time.Second)) {
 			t.Fatalf("%s: End = %+v, want %q before the freeze", id, cov[1], reasonProcessStall)
+		}
+	}
+	// One freeze is one relist per resource: a forced relist must be
+	// consumed by the LIST that serves it, not fire again on the next
+	// Watch (which produced a second End/Start pair in 900 of 900 runs).
+	eventually(t, "sources healthy after the relist", func() bool { return h.c.res[0].src.healthy() && h.c.res[1].src.healthy() })
+	for _, srv := range []*fakeServer{s1, s2} {
+		if n := srv.lists.Load(); n != 2 {
+			t.Errorf("%s: %d LISTs, want 2 (initial + one forced relist)", srv.rt.ID(), n)
+		}
+		if n := len(coverageOf(t, st, srv.rt.ID())); n != 3 {
+			t.Errorf("%s: %d coverage events, want 3: %+v", srv.rt.ID(), n, coverageOf(t, st, srv.rt.ID()))
 		}
 	}
 	if hb, _ := st.Heartbeat(context.Background()); hb.After(t0.Add(4 * time.Second)) {
