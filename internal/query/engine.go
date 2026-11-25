@@ -50,6 +50,19 @@ type Engine struct {
 	store store.Store
 	clock clock.PassiveClock
 	skew  time.Duration
+	live  LiveCoverage
+}
+
+// LiveCoverage reports, for a resource, the instant continuity was lost
+// when that loss is not yet durable as a coverage End (ADR 0007 §2). It
+// must be cheap and safe for concurrent use.
+type LiveCoverage func(resource string) (lostAt time.Time, lost bool)
+
+// WithLiveCoverage makes the engine classify every instant at or after a
+// reported lostAt as a gap, whatever the store says. It only ever turns
+// observed answers into gaps, so it cannot fabricate continuity.
+func WithLiveCoverage(f LiveCoverage) Option {
+	return func(e *Engine) { e.live = f }
 }
 
 // Option configures an Engine.
@@ -232,8 +245,8 @@ func objectState(key model.ObjectKey, at time.Time, cov api.Coverage, rec model.
 }
 
 // stateIn computes the state of key at at within v.
-func (e *Engine) stateIn(ctx context.Context, v store.View, events []model.CoverageEvent, key model.ObjectKey, at time.Time) (api.ObjectState, error) {
-	cov := classify(events, v.Horizon(), at)
+func (e *Engine) stateIn(ctx context.Context, v store.View, tl timeline, key model.ObjectKey, at time.Time) (api.ObjectState, error) {
+	cov := tl.at(at)
 	rec, ok, err := v.Get(ctx, key, at)
 	if err != nil {
 		return api.ObjectState{}, fmt.Errorf("get %s at %s: %w", key, at.Format(time.RFC3339Nano), err)
@@ -252,11 +265,11 @@ func (e *Engine) State(ctx context.Context, key model.ObjectKey, at time.Time) (
 	}
 	var out api.ObjectState
 	err = e.withView(ctx, func(v store.View) error {
-		events, err := v.Coverage(ctx, key.Resource)
+		tl, err := e.timeline(ctx, v, key.Resource)
 		if err != nil {
-			return fmt.Errorf("coverage of %s: %w", key.Resource, err)
+			return err
 		}
-		out, err = e.stateIn(ctx, v, events, key, at)
+		out, err = e.stateIn(ctx, v, tl, key, at)
 		return err
 	})
 	return out, err
@@ -327,11 +340,11 @@ func (e *Engine) ObjectAtSeq(ctx context.Context, key model.ObjectKey, seq uint6
 		if !ok {
 			return invalidf("no record with seq %d for %s (it may have been compacted)", seq, key)
 		}
-		events, err := v.Coverage(ctx, key.Resource)
+		tl, err := e.timeline(ctx, v, key.Resource)
 		if err != nil {
-			return fmt.Errorf("coverage of %s: %w", key.Resource, err)
+			return err
 		}
-		cov := classify(events, v.Horizon(), found.ObservedAt)
+		cov := tl.at(found.ObservedAt)
 		out, err = objectState(key, found.ObservedAt, cov, found, true)
 		if err != nil {
 			return err
