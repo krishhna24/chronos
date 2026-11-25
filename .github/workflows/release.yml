@@ -4,9 +4,12 @@ on:
   push:
     tags: ["v*"]
 
+# Jobs widen this only where they need to.
 permissions:
   contents: read
 
+# Actions are pinned to full commit SHAs; see ci.yml for how they were
+# resolved.
 env:
   IMAGE: ghcr.io/krishhna24/chronos
   HELM_VERSION: "v3.19.0"
@@ -19,17 +22,17 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No QEMU: every RUN step executes on the build platform (the Go stage
       # cross-compiles) and the final stage only copies files.
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           # The chart's default image tag is its appVersion, which the chart
@@ -37,11 +40,15 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-      - uses: docker/build-push-action@v6
+      # SBOM and max-mode SLSA provenance are attached to the pushed image
+      # index as in-toto attestations.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           build-args: VERSION=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -51,13 +58,24 @@ jobs:
   plugin:
     name: kubectl-at binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      # OIDC token for the Sigstore signing certificate
+      attestations: write  # store the provenance attestation
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - run: ./hack/build-plugin-release.sh "$GITHUB_REF_NAME" dist
-      - uses: actions/upload-artifact@v4
+      # Verify with: gh attestation verify <archive> --repo krishhna24/chronos
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: hashFiles('dist/kubectl-at_*') != ''
+        with:
+          subject-path: |
+            dist/kubectl-at_*.tar.gz
+            dist/kubectl-at_*.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plugin
           path: dist/
@@ -67,16 +85,17 @@ jobs:
     name: Helm chart package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: ${{ env.HELM_VERSION }}
+          checksum-policy: required
       - run: |
           v=${GITHUB_REF_NAME#v}
           helm lint --strict deploy/helm/chronos
           helm package deploy/helm/chronos --version "$v" --app-version "$v" -d dist
           (cd dist && sha256sum chronos-*.tgz > "chronos-chart_${GITHUB_REF_NAME}_checksums.txt")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: chart
           path: dist/
@@ -88,12 +107,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
       - run: ls -la dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: dist/*
           generate_release_notes: true
