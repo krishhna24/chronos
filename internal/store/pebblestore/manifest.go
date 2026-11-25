@@ -152,24 +152,33 @@ func compareEntry(a, b listEntry) int {
 	return cmp.Compare(a.name, b.name)
 }
 
-// loadManifest returns the entries of the newest usable manifest at or
-// before opts.At, sorted by key. ok is false when there is no usable
-// manifest (none, older than the horizon, or failing validation); the
-// caller then uses the scan path.
-func (v *view) loadManifest(ctx context.Context, opts store.ListOptions) (h *manifestHeader, es []listEntry, ok bool, err error) {
+// Window limits for the manifest path. The time-index window (S, At] is
+// scanned in full before the first record can be emitted, because its
+// entries are ordered by time, not key. The manifest path is therefore
+// only used when that window is small: at most defaultManifestWindowMin records,
+// or a quarter of the manifest's entries for the resource. The window size
+// is bounded without scanning it: every record and coverage event since S
+// takes one Seq, so it is at most the view's last Seq minus the manifest's.
+const defaultManifestWindowMin = 1024
+
+// loadManifestHeader returns the newest usable manifest at or before
+// opts.At, or nil when there is none, it is older than the horizon, or its
+// header fails validation (the caller then uses the scan path).
+func (v *view) loadManifestHeader(ctx context.Context, opts store.ListOptions) (*manifestHeader, error) {
 	it, err := newIter(ctx, v.snap, &pebble.IterOptions{
 		LowerBound: []byte{tabManifest},
 		UpperBound: atOrBefore([]byte{tabManifest}, opts.At),
 	})
 	if err != nil {
-		return nil, nil, false, err
+		return nil, err
 	}
 	defer func(it *iter) { _ = it.Close() }(it)
 	if !it.Last() {
-		return nil, nil, false, closeIter(it)
+		return nil, closeIter(it)
 	}
 	mk := slices.Clone(it.Key())
 	val, err := iterValue(it)
+	var h *manifestHeader
 	if err == nil {
 		h, err = decodeManifestHeader(mk, val)
 	}
@@ -179,12 +188,27 @@ func (v *view) loadManifest(ctx context.Context, opts store.ListOptions) (h *man
 	if err != nil {
 		v.s.stats.fallbacks.Add(1)
 		v.s.log.Warn("snapshot manifest unusable, falling back to scan", "manifest", describeKey(mk), "err", err)
-		return nil, nil, false, nil
+		return nil, nil
 	}
 	if h.at.Before(v.horizon) {
 		// Compact deletes these; never trust one that survived.
-		return nil, nil, false, nil
+		return nil, nil
 	}
+	return h, nil
+}
+
+// manifestStream yields the entries of one resource's manifest chunks in
+// key order, reading each namespace chunk only when the merge reaches it.
+type manifestStream struct {
+	v    *view
+	h    *manifestHeader
+	opts store.ListOptions
+	nss  []nsCount // remaining namespaces, in order
+	buf  []listEntry
+}
+
+func newManifestStream(v *view, h *manifestHeader, opts store.ListOptions) *manifestStream {
+	var nss []nsCount
 	for _, n := range h.resources[opts.Resource] {
 		if opts.Namespace != "" && n.ns != opts.Namespace {
 			continue
@@ -193,62 +217,110 @@ func (v *view) loadManifest(ctx context.Context, opts store.ListOptions) (h *man
 		if opts.After != nil && n.ns < opts.After.Namespace {
 			continue
 		}
-		ck := chunkKey(h.at, opts.Resource, n.ns)
-		val, closer, err := v.snap.Get(ck)
+		nss = append(nss, n)
+	}
+	return &manifestStream{v: v, h: h, opts: opts, nss: nss}
+}
+
+// errChunkUnusable reports a manifest chunk that is missing or fails
+// validation; the caller resumes on the scan path.
+var errChunkUnusable = errors.New("snapshot manifest chunk unusable")
+
+// peek returns the next entry without consuming it; ok is false at the end.
+func (m *manifestStream) peek() (listEntry, bool, error) {
+	for len(m.buf) == 0 {
+		if len(m.nss) == 0 {
+			return listEntry{}, false, nil
+		}
+		n := m.nss[0]
+		m.nss = m.nss[1:]
+		ck := chunkKey(m.h.at, m.opts.Resource, n.ns)
+		m.v.s.stats.chunkReads.Add(1)
+		val, closer, err := m.v.snap.Get(ck)
 		if errors.Is(err, pebble.ErrNotFound) {
-			v.s.stats.fallbacks.Add(1)
-			v.s.log.Warn("snapshot manifest chunk missing, falling back to scan", "chunk", describeKey(ck))
-			return nil, nil, false, nil
+			m.v.s.log.Warn("snapshot manifest chunk missing, falling back to scan", "chunk", describeKey(ck))
+			return listEntry{}, false, errChunkUnusable
 		}
 		if err != nil {
-			return nil, nil, false, fmt.Errorf("pebblestore: read %s: %w", describeKey(ck), err)
+			return listEntry{}, false, fmt.Errorf("pebblestore: read %s: %w", describeKey(ck), mapPebbleErr(err))
 		}
 		chunk, err := decodeChunk(ck, val, n.count)
 		_ = closer.Close()
 		if err != nil {
-			v.s.stats.fallbacks.Add(1)
-			v.s.log.Warn("snapshot manifest chunk unusable, falling back to scan", "chunk", describeKey(ck), "err", err)
-			return nil, nil, false, nil
+			m.v.s.log.Warn("snapshot manifest chunk unusable, falling back to scan", "chunk", describeKey(ck), "err", err)
+			return listEntry{}, false, errChunkUnusable
 		}
 		for _, e := range chunk {
-			if !afterKey(opts, n.ns, e.name) {
-				continue
+			if afterKey(m.opts, n.ns, e.name) {
+				m.buf = append(m.buf, listEntry{ns: n.ns, name: e.name, at: e.at, deleted: e.deleted, fromMan: true})
 			}
-			es = append(es, listEntry{ns: n.ns, name: e.name, at: e.at, deleted: e.deleted, fromMan: true})
 		}
 	}
-	if !slices.IsSortedFunc(es, compareEntry) {
-		v.s.stats.fallbacks.Add(1)
-		v.s.log.Warn("snapshot manifest namespaces out of order, falling back to scan", "manifest", describeKey(mk))
-		return nil, nil, false, nil
+	return m.buf[0], true, nil
+}
+
+func (m *manifestStream) next() { m.buf = m.buf[1:] }
+
+// seqAt returns the Seq of the latest record at or before t (0: none):
+// one seek on the time index. Seqs since a manifest's lastSeq bound the
+// number of time-index entries in its window.
+func (v *view) seqAt(ctx context.Context, t time.Time) (uint64, error) {
+	it, err := newIter(ctx, v.snap, &pebble.IterOptions{
+		LowerBound: []byte{tabIndex},
+		UpperBound: atOrBefore([]byte{tabIndex}, t),
+	})
+	if err != nil {
+		return 0, err
 	}
-	return h, es, true, nil
+	defer func(it *iter) { _ = it.Close() }(it)
+	if !it.Last() {
+		return 0, closeIter(it)
+	}
+	val, err := iterValue(it)
+	var ref indexRef
+	if err == nil {
+		ref, err = decodeIndexRef(it.Key(), val)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return ref.seq, closeIter(it)
 }
 
 // listFromManifest serves List from the newest manifest at S <= opts.At
-// plus the time index over (S, opts.At]. done is false when no usable
-// manifest exists and nothing has been emitted, so the caller must fall
-// back to the scan path.
+// plus the time index over (S, opts.At]. done is false when the scan path
+// must serve the request instead (no usable manifest, or a window too
+// large to be worth it); nothing has been emitted then. A chunk found
+// unusable part-way through is handled here: the rest of the listing
+// continues on the scan path after the last key emitted, so results stay
+// identical and nothing is emitted twice.
 func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn func(model.Record) error) (done bool, err error) {
-	h, base, ok, err := v.loadManifest(ctx, opts)
+	h, err := v.loadManifestHeader(ctx, opts)
+	if err != nil || h == nil {
+		return err != nil, err
+	}
+	entries := 0
+	for _, n := range h.resources[opts.Resource] {
+		entries += n.count
+	}
+	seqAt, err := v.seqAt(ctx, opts.At)
 	if err != nil {
 		return true, err
 	}
-	if !ok {
+	if window := seqAt - min(seqAt, h.lastSeq); window > uint64(max(v.s.manifestWindowMin, entries/4)) {
+		v.s.stats.windowSkips.Add(1)
 		return false, nil
 	}
 	s := h.at
-	// Entries that are deletes older than the view's horizon were removed
-	// by a Compact that ran after the manifest was built (the store.go
-	// contract drops a key whose latest record before the horizon is a
-	// delete). If the manifest was built at the current horizon, its
-	// entries already reflect that compaction and any such delete was
-	// written afterwards, so it is real.
-	// Also while a compaction is pending in this view's snapshot: it may
-	// have removed some of those keys already and not others.
+	// Entries that are deletes older than the view's horizon may have been
+	// removed by a Compact that ran after the manifest was built (the
+	// store.go contract drops a key whose latest record before the horizon
+	// is a delete), or by one still pending in this snapshot; such an entry
+	// is skipped if its record is gone, as the scan would not find it.
 	compactedSince := v.horizon.After(h.builtHorizon) || !v.pending.IsZero()
 
-	// Keys changed in (S, At], with their latest change in that window.
+	// Keys of this resource changed in (S, At], latest change each. The
+	// window is small (checked above).
 	window := map[model.ObjectKey]listEntry{}
 	if opts.At.After(s) {
 		it, err := newIter(ctx, v.snap, &pebble.IterOptions{
@@ -259,21 +331,13 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 			return true, err
 		}
 		defer func(it *iter) { _ = it.Close() }(it)
-		n := 0
 		for ok := it.First(); ok; ok = it.Next() {
-			if n++; n%ctxCheckEvery == 0 {
-				if err := ctx.Err(); err != nil {
-					_ = it.Close()
-					return true, err
-				}
-			}
 			val, err := iterValue(it)
 			var ref indexRef
 			if err == nil {
 				ref, err = decodeIndexRef(it.Key(), val)
 			}
 			if err != nil {
-				_ = it.Close()
 				return true, err
 			}
 			if ref.key.Resource != opts.Resource || (opts.Namespace != "" && ref.key.Namespace != opts.Namespace) ||
@@ -288,6 +352,7 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 	}
 	changed := slices.SortedFunc(maps.Values(window), compareEntry)
 
+	var last *listEntry
 	emit := func(e listEntry) error {
 		k := model.ObjectKey{Resource: opts.Resource, Namespace: e.ns, Name: e.name}
 		vk := versionKey(k, e.at)
@@ -298,34 +363,60 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 		if err == nil && !found {
 			err = corruptf(vk, "listed by snapshot manifest or time index but missing")
 		}
+		if err == nil {
+			last = &e
+		}
 		return err
 	}
-	i, j, n := 0, 0, 0
-	for i < len(base) || j < len(changed) {
+	ms := newManifestStream(v, h, opts)
+	for i := 1; i < len(ms.nss); i++ {
+		if ms.nss[i-1].ns >= ms.nss[i].ns {
+			v.s.stats.fallbacks.Add(1)
+			v.s.log.Warn("snapshot manifest namespaces out of order, falling back to scan", "manifest", describeKey(manifestKey(h.at)))
+			return false, nil
+		}
+	}
+	j, n := 0, 0
+	for {
 		if n++; n%ctxCheckEvery == 0 {
 			if err := ctx.Err(); err != nil {
 				return true, err
 			}
 		}
+		b, okB, err := ms.peek()
+		if errors.Is(err, errChunkUnusable) {
+			v.s.stats.fallbacks.Add(1)
+			rest := opts
+			if last != nil {
+				rest.After = &model.ObjectKey{Namespace: last.ns, Name: last.name}
+			}
+			return true, v.listScan(ctx, rest, fn)
+		}
+		if err != nil {
+			return true, err
+		}
+		okC := j < len(changed)
 		var e listEntry
 		switch {
-		case j >= len(changed):
-			e = base[i]
-			i++
-		case i >= len(base):
+		case !okB && !okC:
+			return true, nil
+		case !okC:
+			e = b
+			ms.next()
+		case !okB:
 			e = changed[j]
 			j++
 		default:
-			switch c := compareEntry(base[i], changed[j]); {
+			switch c := compareEntry(b, changed[j]); {
 			case c < 0:
-				e = base[i]
-				i++
+				e = b
+				ms.next()
 			case c > 0:
 				e = changed[j]
 				j++
 			default: // changed after S: the window entry is newer
 				e = changed[j]
-				i++
+				ms.next()
 				j++
 			}
 		}
@@ -333,5 +424,4 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 			return true, err
 		}
 	}
-	return true, nil
 }
