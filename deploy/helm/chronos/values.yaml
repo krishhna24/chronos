@@ -29,7 +29,12 @@ config:
   retentionInterval: 10m
   # --resources: resource types to record. Empty records all supported
   # types (pods, deployments, replicasets, services, configmaps, events,
-  # secrets). Names, short names and canonical IDs are accepted.
+  # secrets). Names, short names and canonical IDs are accepted; unknown
+  # names fail rendering. The ClusterRole grants list/watch on exactly
+  # these types. Recording secrets needs list/watch on secrets, which RBAC
+  # cannot narrow to metadata: the ServiceAccount token can then read
+  # Secret data. Drop "secrets" here if you do not need Secret history.
+  # Set types here, not with --resources in extraArgs (that is rejected).
   resources: []
   # --redact-annotations: annotation keys removed from every object before
   # it is stored. kubectl.kubernetes.io/last-applied-configuration is always

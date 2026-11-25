@@ -42,6 +42,15 @@ Open the dashboard:
   # or, through kubectl proxy (the trailing slash is required):
   kubectl proxy
   # http://localhost:8001/api/v1/namespaces/{{ $ns }}/services/{{ $full }}:http/proxy/
+{{- $types := (include "chronos.selectedTypes" . | fromJson).types }}
+{{- range $types }}{{ if eq .resource "secrets" }}
+
+Secrets: Chronos stores only Secret metadata, but Kubernetes RBAC cannot
+limit a grant to metadata. The ServiceAccount {{ $ns }}/{{ include "chronos.serviceAccountName" $ }}
+has list/watch on secrets cluster-wide, which also allows reading Secret
+data with its token. Leave "secrets" out of config.resources if you do not
+need Secret history.
+{{- end }}{{ end }}
 {{- if .Values.readerRole.create }}
 
 Grant users access. Role {{ $ns }}/{{ $full }}-reader allows `get` on
