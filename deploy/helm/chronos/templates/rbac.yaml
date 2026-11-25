@@ -1,7 +1,14 @@
 {{- if .Values.rbac.create }}
-# Reflectors only LIST and WATCH; nothing GETs individual objects. Secrets
-# are read through the metadata API, which still needs list/watch on
-# secrets (ADR 0005).
+{{- $core := list }}
+{{- $apps := list }}
+{{- range (include "chronos.selectedTypes" . | fromJson).types }}
+{{- if eq .group "" }}{{ $core = append $core .resource }}{{ else }}{{ $apps = append $apps .resource }}{{ end }}
+{{- end }}
+# Rules are generated from config.resources: only the recorded types are
+# granted. Reflectors only LIST and WATCH; nothing GETs single objects.
+# Secrets are read through the metadata API, but Kubernetes RBAC cannot
+# restrict a grant to metadata: list/watch on secrets also allows reading
+# Secret data with this ServiceAccount's token (ADR 0005).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -9,12 +16,16 @@ metadata:
   labels:
     {{- include "chronos.labels" . | nindent 4 }}
 rules:
+  {{- with $core }}
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "events", "secrets"]
+    resources: {{ toJson . }}
     verbs: ["list", "watch"]
+  {{- end }}
+  {{- with $apps }}
   - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
+    resources: {{ toJson . }}
     verbs: ["list", "watch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

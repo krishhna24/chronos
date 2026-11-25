@@ -54,13 +54,22 @@ cluster and replays a short demo scenario.
 | Service, ClusterIP, port `http` | `chronos` | API and dashboard |
 | Service, headless | `chronos-headless` | StatefulSet governing service only |
 | ServiceAccount | `chronos` | identity of the collector |
-| ClusterRole + ClusterRoleBinding | `chronos` | `list`, `watch` on pods, services, configmaps, events, secrets, deployments, replicasets |
+| ClusterRole + ClusterRoleBinding | `chronos` | `list`, `watch` on exactly the types in `config.resources` (default: pods, services, configmaps, events, secrets, deployments, replicasets) |
 | Role | `chronos-reader` | for users: `get` on `services/proxy` for the Chronos Service only |
 | NetworkPolicy (optional) | `chronos` | ingress to the API port only |
 
 The collector only lists and watches; it never `get`s single objects.
-Secrets are read through the metadata API, which needs the same
-`list`/`watch` verbs, but Secret `data` is never requested (ADR 0005).
+The ClusterRole is generated from `config.resources`, so a type you do not
+record is not granted.
+
+**Secrets:** Chronos reads Secrets through the metadata API and never
+requests their `data` (ADR 0005), but Kubernetes RBAC cannot narrow a
+grant to metadata. Recording Secret metadata needs `list`/`watch` on
+`secrets` cluster-wide, and that same grant lets anyone holding the
+Chronos ServiceAccount token read every Secret's data through the normal
+API. If you do not need Secret history, leave `secrets` out of
+`config.resources` and the chart drops the grant, for example
+`--set 'config.resources={pods,deploy,rs,svc,cm,ev}'`.
 Cluster-scoped objects are named `<namespace>-<fullname>` when the release
 is not the default, so two installs cannot collide.
 
@@ -155,7 +164,7 @@ Every server flag and the chart value that sets it:
 | `--data-dir` | fixed `/var/lib/chronos` | | the PVC (or emptyDir) mount; see `persistence.*` |
 | `--retention` | `config.retention` | `168h` | at least `1h` |
 | `--retention-interval` | `config.retentionInterval` | `10m` | |
-| `--resources` | `config.resources` (list) | `[]` = all | e.g. `[pods, deploy, cm]` |
+| `--resources` | `config.resources` (list) | `[]` = all | e.g. `[pods, deploy, cm]`; names resolve like the server (plural, singular, kind, short name, `<plural>.<group>`, canonical ID) and an unknown name fails `helm install`; also drives the ClusterRole |
 | `--redact-annotations` | `config.redactAnnotations` (list) | `[]` | removed from every object |
 | `--secret-annotation-allowlist` | `config.secretAnnotationAllowlist` (list) | `[]` | the only annotations kept on Secrets; all others are dropped (ADR 0005) |
 | `--stall-timeout` | `config.stallTimeout` | `5s` | a change waiting longer than this for the store ends coverage of its type and forces a relist |
@@ -167,7 +176,7 @@ Every server flag and the chart value that sets it:
 | `--listen` | `containerPort` | `8080` | the Service port is `service.port` (default `8080`), named `http` |
 | `--kubeconfig` | not exposed | in-cluster | the pod always uses its ServiceAccount |
 | `--version` | n/a | | |
-| anything else | `extraArgs` (list) | `[]` | appended after the generated flags |
+| anything else | `extraArgs` (list) | `[]` | appended after the generated flags, each quoted; `--resources` is rejected here (use `config.resources`, which RBAC follows) |
 
 Other values:
 
