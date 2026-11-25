@@ -75,7 +75,9 @@ func runCompact(args []string) error {
 	}
 	var keys []model.ObjectKey
 	var first, last time.Time
+	nBefore := 0
 	err = v.Changes(ctx, store.ChangesOptions{From: time.Unix(0, 0), To: farFuture()}, func(r model.Record) error {
+		nBefore++
 		if first.IsZero() {
 			first = r.ObservedAt
 		}
@@ -121,7 +123,7 @@ func runCompact(args []string) error {
 	}
 	_ = v.Close()
 	sizeBefore := dirSize(*dir)
-	fmt.Printf("compact: %s keys=%d records %s .. %s horizon=%s size=%d B\n", *resource, len(keys),
+	fmt.Printf("compact: %d records (all resources); %s keys=%d; records %s .. %s horizon=%s size=%d B\n", nBefore, *resource, len(keys),
 		first.Format(time.RFC3339Nano), last.Format(time.RFC3339Nano), horizon.Format(time.RFC3339Nano), sizeBefore)
 
 	// Readers: a fresh View per operation, as the HTTP server does.

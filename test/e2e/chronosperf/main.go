@@ -15,6 +15,7 @@
 //	burst     N back-to-back updates of one object, then count records
 //	recreate  delete and recreate one name N times, then check history
 //	compact   compaction on a copy of a store with concurrent readers
+//	verify    Chronos "now" equals a live LIST of ConfigMaps
 //	cleanup   delete the perf-* namespaces
 //
 // Every subcommand that talks to Kubernetes takes -kubeconfig and
@@ -41,6 +42,7 @@ var commands = map[string]command{
 	"recreate": {runRecreate, "delete + recreate the same name"},
 	"compact":  {runCompact, "compaction with concurrent reads (store copy)"},
 	"cleanup":  {runCleanup, "delete perf namespaces"},
+	"verify":   {runVerify, "Chronos now-state equals the live ConfigMaps"},
 }
 
 func main() {
