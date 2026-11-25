@@ -18,7 +18,12 @@ Updated: 2026-11-26
 - [x] Phase 6 — Rebuild and hardening: every defect re-verified; CI green
   on GitHub (run 45675248754).
 - [ ] Phase 7 — Release readiness: image, chart, install docs and green CI
-  done; first tagged release (v0.1.0) not yet cut.
+  done. Tag v0.1.0 (2026-11-26) published the image
+  ghcr.io/krishhna24/chronos:0.1.0 and built the chart and plugin
+  archives, but the GitHub release was not created: artifact attestation
+  is unavailable on user-owned private repos. Fixed on main (71dc925:
+  the step is skipped on private repos). Next release (e.g. v0.1.1) will
+  run the fixed workflow; on hold by owner decision.
 
 ## Environment
 Go 1.26.11, Node 26, pnpm 12, Docker 29, kind 0.33, kubectl 1.36,
@@ -101,7 +106,7 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 - **Green on 2026-11-26, run 45675248754 (ce97898): all 5 jobs pass** —
   Go lint + test -race, web, Docker image build, Helm lint, and
   integration on kind (collector integration tests + hack/kind-demo.sh).
-- Release workflow (tag v*) has never run.
+- Release workflow: first run on v0.1.0 failed at artifact attestation (fixed in 71dc925, not yet re-run).
 
 ### First run (2026-11-25, run 45581848591)
 - Pass: web, Docker image build, Helm lint, make lint (pinned, checksum-verified golangci-lint).
