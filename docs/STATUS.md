@@ -1,6 +1,6 @@
 # Chronos engineering status
 
-Updated: 2026-11-25
+Updated: 2026-11-26
 
 ## Phase
 - [x] Phase 1 — Reconnaissance: local dir and GitHub repo
@@ -10,14 +10,14 @@ Updated: 2026-11-25
   storetest conformance suite, `internal/api` wire types, `docs/api.md`.
 - [ ] Phase 3 — Core implementation (parallel workstreams below)
 - [x] Phase 4 — Integration: all components wired; pebble default.
-- [~] Phase 5 — Adversarial verification: two independent review rounds
+- [x] Phase 6 — Rebuild and hardening: every review/chaos defect fixed and re-verified; CI green.
+- [x] Phase 5 — Adversarial verification: two independent review rounds
   (all findings fixed with regression tests); scale + 12 chaos scenarios
-  run (docs/performance.md, docs/reliability.md): 10 PASS, 2 FAIL (D1
-  process stall, D2 unrecordable coverage loss) -> ADR 0007, fixes in
-  progress.
+  (docs/performance.md, docs/reliability.md); D1/D2 fixed per ADR 0007 and
+  re-tested (freeze: lag max 2m5s -> 1.6s with process-stall gap; disk
+  full: read-only with gap, LOST=0).
 - [ ] Phase 5 — Adversarial verification
-- [ ] Phase 6 — Rebuild and hardening
-- [ ] Phase 7 — Release readiness (image/chart/CI/install docs exist; blocked on pebble + review fixes)
+- [ ] Phase 7 — Release readiness: image, chart, install docs and green CI done; first tagged release (v0.1.0) not yet cut.
 
 ## Environment
 Go 1.26.11, Node 26, pnpm 12, Docker 29, kind 0.33, kubectl 1.36,
@@ -96,7 +96,13 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
   (disk full: API answered observed while End could not be written) ->
   ADR 0007 (watchdog + live coverage overlay), assigned to collector/query.
 
-## CI on GitHub (first run 2026-11-25, run 45581848591)
+## CI on GitHub
+- **Green on 2026-11-26, run 45675248754 (ce97898): all 5 jobs pass** —
+  Go lint + test -race, web, Docker image build, Helm lint, and
+  integration on kind (collector integration tests + hack/kind-demo.sh).
+- Release workflow (tag v*) has never run.
+
+### First run (2026-11-25, run 45581848591)
 - Pass: web, Docker image build, Helm lint, make lint (pinned, checksum-verified golangci-lint).
 - Fail: go test -race — TestCrashDurability (test harness dropped unread
   acks; fixed 65a8abb) and TestRestartAfterCleanShutdown (real shutdown
