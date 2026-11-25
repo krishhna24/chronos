@@ -263,9 +263,7 @@ func pebbleOptions(opts Options, log *slog.Logger) (*pebble.Options, *pebble.Cac
 		DataCorruption: func(info pebble.DataCorruptionInfo) {
 			log.Error("pebble detected on-disk corruption", "path", info.Path, "details", info.Details)
 		},
-		BackgroundError: func(err error) {
-			log.Error("pebble background error", "err", err)
-		},
+		BackgroundError: newRateLimitedLog(log, "pebble background error", 10*time.Second, time.Now).report,
 	}
 	blockSize := opts.BlockSize
 	if blockSize <= 0 {
@@ -917,3 +915,33 @@ func (s *Store) CompactLSM(ctx context.Context) error {
 
 // ctxCheckEvery bounds how many iterator steps run between context checks.
 const ctxCheckEvery = 256
+
+// rateLimitedLog logs the first error at once and then at most one line
+// per interval, carrying how many were suppressed. With the disk full,
+// Pebble retries background compactions continuously and logged hundreds
+// of identical errors a minute, drowning everything else.
+type rateLimitedLog struct {
+	mu         sync.Mutex
+	log        *slog.Logger
+	msg        string
+	every      time.Duration
+	now        func() time.Time
+	last       time.Time
+	suppressed int
+}
+
+func newRateLimitedLog(log *slog.Logger, msg string, every time.Duration, now func() time.Time) *rateLimitedLog {
+	return &rateLimitedLog{log: log, msg: msg, every: every, now: now}
+}
+
+func (r *rateLimitedLog) report(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := r.now()
+	if !r.last.IsZero() && t.Sub(r.last) < r.every {
+		r.suppressed++
+		return
+	}
+	r.log.Error(r.msg, "err", err, "suppressed", r.suppressed)
+	r.last, r.suppressed = t, 0
+}
