@@ -10,25 +10,106 @@ import (
 	"github.com/krishhna24/chronos/internal/store"
 )
 
-// CoverageAt classifies instant t for resource according to ADR 0004 using
-// the given view. It does not validate t against the clock; callers that
-// accept user input go through the Engine methods, which do.
-func (e *Engine) CoverageAt(ctx context.Context, v store.View, resource string, t time.Time) (api.Coverage, error) {
+// LiveLossReason is the gap reason of an instant classified by the live
+// coverage overlay (ADR 0007 §2).
+const LiveLossReason = "continuity lost; not yet recorded"
+
+// timeline is everything that determines coverage of one resource within
+// one call: the view's events and horizon, and the live overlay sampled
+// once, so every part of an answer agrees.
+type timeline struct {
+	events  []model.CoverageEvent
+	horizon time.Time
+	lostAt  time.Time
+	lost    bool
+}
+
+func (e *Engine) timeline(ctx context.Context, v store.View, resource string) (timeline, error) {
 	events, err := v.Coverage(ctx, resource)
 	if err != nil {
-		return api.Coverage{}, fmt.Errorf("coverage of %s: %w", resource, err)
+		return timeline{}, fmt.Errorf("coverage of %s: %w", resource, err)
 	}
-	return classify(events, v.Horizon(), t), nil
+	tl := timeline{events: events, horizon: v.Horizon()}
+	if e.live != nil {
+		tl.lostAt, tl.lost = e.live(resource)
+	}
+	return tl, nil
+}
+
+// at classifies t: the stored classification, downgraded to the overlay
+// gap when t >= lostAt and the store says observed. A stored gap that began
+// at or before lostAt is kept as is (the store knew first); one that began
+// after it is reported as the overlay gap, which already covers it.
+// Expired and unobserved are never changed.
+func (tl timeline) at(t time.Time) api.Coverage {
+	c := classify(tl.events, tl.horizon, t)
+	if !tl.lost || t.Before(tl.lostAt) {
+		return c
+	}
+	switch c.State {
+	case api.CoverageObserved:
+	case api.CoverageGap:
+		if c.Since != nil && !c.Since.After(tl.lostAt) {
+			return c
+		}
+	default:
+		return c
+	}
+	return api.Coverage{State: api.CoverageGap, Since: timePtr(tl.lostAt), Reason: LiveLossReason}
+}
+
+// observedThroughout: stored rule plus the overlay. With a loss at lostAt,
+// any range reaching lostAt is incomplete; checking to suffices since
+// coverage at to is then a gap.
+func (tl timeline) observedThroughout(from, to time.Time) bool {
+	if !observedThroughout(tl.events, tl.horizon, from, to) {
+		return false
+	}
+	return tl.at(from).State == api.CoverageObserved && tl.at(to).State == api.CoverageObserved
+}
+
+// intervals are the stored intervals with everything at or after lostAt
+// removed: an interval spanning lostAt ends there with LiveLossReason, and
+// one starting at or after it is dropped, matching at().
+func (tl timeline) intervals() []api.Interval {
+	ivs := intervals(tl.events)
+	if !tl.lost {
+		return ivs
+	}
+	out := ivs[:0]
+	for _, iv := range ivs {
+		if !iv.Start.Before(tl.lostAt) {
+			continue
+		}
+		if iv.End == nil || iv.End.After(tl.lostAt) {
+			iv.End = timePtr(tl.lostAt)
+			iv.EndReason = LiveLossReason
+		}
+		out = append(out, iv)
+	}
+	return out
+}
+
+// CoverageAt classifies instant t for resource according to ADR 0004 (and
+// the live overlay, if configured) using the given view. It does not
+// validate t against the clock; callers that accept user input go through
+// the Engine methods, which do.
+func (e *Engine) CoverageAt(ctx context.Context, v store.View, resource string, t time.Time) (api.Coverage, error) {
+	tl, err := e.timeline(ctx, v, resource)
+	if err != nil {
+		return api.Coverage{}, err
+	}
+	return tl.at(t), nil
 }
 
 // Intervals returns the observation intervals of resource that the view
-// retains, oldest first.
+// retains, oldest first, cut short by the live overlay if configured.
 func (e *Engine) Intervals(ctx context.Context, v store.View, resource string) ([]api.Interval, error) {
-	events, err := v.Coverage(ctx, resource)
+	tl, err := e.timeline(ctx, v, resource)
 	if err != nil {
-		return nil, fmt.Errorf("coverage of %s: %w", resource, err)
+		return nil, err
 	}
-	return intervals(events), nil
+	return tl.intervals(), nil
 }
 
 // lastAtOrBefore returns the index of the last event, in Seq order, whose At

@@ -37,17 +37,17 @@ func (e *Engine) Diff(ctx context.Context, key model.ObjectKey, from, to time.Ti
 
 	var out api.DiffResponse
 	err = e.withView(ctx, func(v store.View) error {
-		events, err := v.Coverage(ctx, key.Resource)
+		tl, err := e.timeline(ctx, v, key.Resource)
 		if err != nil {
-			return fmt.Errorf("coverage of %s: %w", key.Resource, err)
-		}
-		if out.From, err = e.stateIn(ctx, v, events, key, from); err != nil {
 			return err
 		}
-		if out.To, err = e.stateIn(ctx, v, events, key, to); err != nil {
+		if out.From, err = e.stateIn(ctx, v, tl, key, from); err != nil {
 			return err
 		}
-		out.Complete = observedThroughout(events, v.Horizon(), from, to)
+		if out.To, err = e.stateIn(ctx, v, tl, key, to); err != nil {
+			return err
+		}
+		out.Complete = tl.observedThroughout(from, to)
 		return nil
 	})
 	if err != nil {
