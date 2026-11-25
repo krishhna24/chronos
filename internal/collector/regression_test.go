@@ -7,6 +7,9 @@ package collector
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"slices"
+	"sync"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -330,4 +333,66 @@ func TestRegressionDeleteWithUnknownUID(t *testing.T) {
 	// The key is absent afterwards: a later Add is a fresh Added.
 	w.Add(srv.set(cm("ns", "a", "uc", "1")))
 	waitJournal(t, st, cmID, "Added/baseline ns/a ua", "Start", "Deleted/resync ns/a ua", "Added/watch ns/a uc")
+}
+
+// captureHandler records log records for assertions.
+type captureHandler struct {
+	mu   *sync.Mutex
+	recs *[]slog.Record
+}
+
+func newCapture() (*slog.Logger, func() []slog.Record) {
+	h := captureHandler{mu: &sync.Mutex{}, recs: &[]slog.Record{}}
+	return slog.New(h), func() []slog.Record {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return slices.Clone(*h.recs)
+	}
+}
+
+func (h captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	*h.recs = append(*h.recs, r.Clone())
+	return nil
+}
+func (h captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// listApplied returns the coverageEnded attribute of every "list applied"
+// log record, in order.
+func listApplied(recs []slog.Record) []bool {
+	var out []bool
+	for _, r := range recs {
+		if r.Message != "list applied" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "coverageEnded" {
+				out = append(out, a.Value.Bool())
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// D4: "list applied" must report coverageEnded only when the batch held
+// an End. A batch of just [Start] (empty or unchanged LIST) does not.
+func TestRegressionListAppliedCoverageEndedAttr(t *testing.T) {
+	st := memstore.New()
+	clk := testingclock.NewFakeClock(t0)
+	srv := newServer(configmaps) // empty LIST: batch is [Start]
+	log, logs := newCapture()
+	h := start(t, st, clk, []*fakeServer{srv}, func(c *Config) { c.Logger = log })
+	w := srv.watcher(t)
+	waitJournal(t, st, cmID, "Start")
+	eventually(t, "source healthy", h.c.res[0].src.healthy)
+	w.Error(&metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonExpired})
+	waitJournal(t, st, cmID, "Start", "End", "Start") // relist: [End, Start]
+	eventually(t, "two list applied logs", func() bool { return len(listApplied(logs())) == 2 })
+	if got := listApplied(logs()); got[0] || !got[1] {
+		t.Fatalf("coverageEnded = %v, want [false true]", got)
+	}
 }

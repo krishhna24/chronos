@@ -503,7 +503,8 @@ func (w *writer) handleReplace(ctx context.Context, it item) error {
 		origin, startReason = model.OriginBaseline, reasonInitialList
 	}
 	entries := make([]store.Entry, 0, len(keys)+2)
-	if r.covOpen {
+	ended := r.covOpen
+	if ended {
 		lostAt, reason := it.lostAt, reasonRelist
 		if !r.lostAt.IsZero() && (lostAt.IsZero() || !r.lostAt.After(lostAt)) {
 			lostAt, reason = r.lostAt, r.lostReason
@@ -548,7 +549,7 @@ func (w *writer) handleReplace(ctx context.Context, it item) error {
 	r.setState(func() { r.synced, r.lost, r.lostAt, r.lostReason = true, false, time.Time{}, "" })
 	r.src.relistDone()
 	w.log.Info("list applied", "resource", r.id, "origin", origin.String(), "objects", len(listed),
-		"added", added, "modified", modified, "deleted", deleted, "coverageEnded", len(entries) > 0 && entries[0].Coverage != nil)
+		"added", added, "modified", modified, "deleted", deleted, "coverageEnded", ended)
 	return nil
 }
 
