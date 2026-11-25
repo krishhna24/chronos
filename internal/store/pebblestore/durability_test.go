@@ -263,7 +263,12 @@ func TestCrashDurability(t *testing.T) {
 		}
 		lastAck, acks := -1, 0
 		var lastHB int64
+		killed := false
 		sc := bufio.NewScanner(out)
+		// Read every ack until the pipe closes: the child keeps committing
+		// and acknowledging while we sleep before the kill, and those acks
+		// are already in the pipe. Stopping at the kill would make durable,
+		// acknowledged batches look like they were never acknowledged.
 		for sc.Scan() {
 			var i int
 			var hb int64
@@ -272,16 +277,19 @@ func TestCrashDurability(t *testing.T) {
 				continue
 			}
 			lastAck, lastHB = i, hb
-			if acks++; acks == killAfter {
+			if acks++; acks == killAfter && !killed {
 				// Let the child get into the middle of its next commit.
 				time.Sleep(time.Duration(r.IntN(3000)) * time.Microsecond)
 				if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
 					t.Fatal(err)
 				}
-				break
+				killed = true
 			}
 		}
 		_ = cmd.Wait()
+		if !killed {
+			t.Fatalf("round %d: child exited before being killed (%d acks)", round, acks)
+		}
 		if lastAck < next {
 			t.Fatalf("round %d: child acknowledged nothing", round)
 		}
