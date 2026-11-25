@@ -79,10 +79,10 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 | 1 | high | SST corruption panics readers (Fatalf) and leaks iterators; Close then panics | storage | fixing |
 | 2 | medium | Compact ignores ctx on hung commit; main waited for retention before Store.Close | storage + orchestrator | shutdown order fixed (this commit); store ctx handling in progress |
 | 3 | medium | Compact builds one unbounded batch (OOM risk after long outage) | storage | fixing (chunked compaction) |
-| 4 | medium | Actions/base images pinned by tag; curl\|sh lint install; no SBOM/provenance | devops | fixing |
-| 5 | low-med | RBAC grants secrets list/watch even when secrets not recorded | devops | fixing |
+| 4 | medium | Actions/base images pinned by tag; curl\|sh lint install; no SBOM/provenance | devops | fixed (44a65f5): SHA-pinned actions, digest-pinned bases, checksum-verified golangci-lint and pnpm, SBOM+provenance; workflows still never run on GitHub |
+| 5 | low-med | RBAC grants secrets list/watch even when secrets not recorded | devops | fixed (44a65f5) + drift test chart vs Builtin (98103cc) |
 | 6 | low | Pebble background Fatalf crashes process; doc overclaims | storage | fixing (doc) |
-| 7 | low | Chart args unquoted; large ints render as floats | devops | fixing |
+| 7 | low | Chart args unquoted; large ints render as floats | devops | fixed (44a65f5) |
 | 8 | low | Close-after-timeout returns nil; qps/burst/interval unvalidated | storage + orchestrator | flags fixed (this commit) |
 
 ## Known defects / follow-ups
