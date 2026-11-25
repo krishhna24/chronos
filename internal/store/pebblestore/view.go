@@ -28,6 +28,7 @@ type view struct {
 	s       *Store
 	snap    *pebble.Snapshot
 	horizon time.Time
+	pending time.Time // horizon of an unfinished compaction in snap
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -57,6 +58,17 @@ func newView(s *Store) (*view, error) {
 			_ = snap.Close()
 			return nil, err
 		}
+	}
+	if val, closer, err := snap.Get(keyCompacting); err == nil {
+		v.pending, err = decodeTimeValue(keyCompacting, val)
+		_ = closer.Close()
+		if err != nil {
+			_ = snap.Close()
+			return nil, err
+		}
+	} else if !errors.Is(err, pebble.ErrNotFound) {
+		_ = snap.Close()
+		return nil, mapPebbleErr(err)
 	}
 	return v, nil
 }

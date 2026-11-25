@@ -1,7 +1,9 @@
 package pebblestore
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -12,21 +14,49 @@ import (
 	"github.com/krishhna24/chronos/internal/model"
 )
 
+// Default bounds on one compaction batch. A first retention run after a
+// long outage can delete millions of records; committing them in bounded
+// chunks keeps memory flat instead of building one batch for all of them.
+const (
+	defaultCompactChunkDeletes = 50_000
+	defaultCompactChunkBytes   = 64 << 20
+)
+
 // Compact implements store.Store.
 //
-// It reads a Pebble snapshot, computes every deletion the store.go
-// contract requires for records and coverage events older than horizon,
-// drops snapshot manifests older than horizon, and commits all of it with
-// the new horizon in one synced batch. Compact is therefore atomic: a View
-// sees either the state before or after it, never a mix, and a crash
-// leaves one or the other.
+// Compaction runs in three steps, each committed with pebble.Sync:
 //
-// Concurrent Writes are not blocked. Compact behaves as if it ran at the
-// instant its snapshot was taken: a record committed after that instant is
-// kept even if it is older than horizon, exactly as memstore keeps a
-// record written right after its Compact returns. Deleted keys are point
-// keys disjoint from anything a Write adds (times are unique), so the two
-// never conflict.
+//  1. Start batch: the new horizon H, a "compaction pending at H" marker
+//     (meta "compacting"), and deletion of every snapshot manifest older
+//     than H (they rely on time-index entries about to be removed).
+//  2. Record chunks: a scan of the version table, object by object, that
+//     deletes every version older than H except the newest one below H,
+//     and that newest one too if it is a delete (store.go contract).
+//     Deletions are committed in chunks of at most
+//     defaultCompactChunkDeletes keys or defaultCompactChunkBytes.
+//  3. Final batch: coverage events older than H except the latest, and
+//     removal of the pending marker.
+//
+// Why the horizon goes first: the contract promises that state at every
+// t >= horizon is unchanged by compaction. Each chunk deletes only
+// versions older than H that are superseded by a newer version below H
+// (never visible at t >= H), or the newest version below H when it is a
+// delete (the contract removes that key entirely). So at every
+// intermediate point, and after a crash between chunks, every answer at
+// t >= H is already the final one, except that a key whose newest record
+// below H is a delete may still be reported with that delete record until
+// its chunk commits. Writing H last instead would make Views opened (or a
+// restart) between chunks claim history is reconstructable from the old
+// horizon while records in [old, H) are already gone.
+//
+// A crash leaves the marker; the next Compact (any horizon) finishes the
+// pending run first, and snapshot manifests are not written while one is
+// pending. Concurrent Writes are not blocked: each run behaves as if it
+// happened at the instant of its snapshot, so a record committed after
+// that instant is kept even if it is older than H, as memstore keeps a
+// record written right after its Compact returns. (A resumed run takes a
+// fresh snapshot and therefore also compacts such records; the contract
+// says nothing about state below the horizon.)
 func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -42,88 +72,89 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 	horizon = normTime(horizon)
 
 	s.mu.Lock()
-	if !horizon.After(s.horizon) {
-		s.mu.Unlock()
+	cur, pending := s.horizon, s.pending
+	s.mu.Unlock()
+	if !pending.IsZero() {
+		if err := s.compactTo(ctx, pending, true); err != nil {
+			return err
+		}
+		cur = pending
+	}
+	if !horizon.After(cur) {
 		return nil
 	}
-	snap := s.db.NewSnapshot()
+	return s.compactTo(ctx, horizon, false)
+}
+
+// compactTo runs (or, with resume, finishes) a compaction to h.
+func (s *Store) compactTo(ctx context.Context, h time.Time, resume bool) error {
+	start := time.Now()
+	var stats struct{ records, coverage, manifests, chunks int }
+
+	// Step 1: horizon, pending marker, stale manifests.
+	b := s.db.NewBatch()
+	if err := s.addManifestDeletes(ctx, b, h, &stats.manifests); err != nil {
+		_ = b.Close()
+		return err
+	}
+	if err := errors.Join(
+		b.Set(keyHorizon, seal(keyHorizon, encodeTimeValue(h)), nil),
+		b.Set(keyCompacting, seal(keyCompacting, encodeTimeValue(h)), nil),
+	); err != nil {
+		_ = b.Close()
+		return fmt.Errorf("pebblestore: compact: %w", err)
+	}
+	if err := s.commitWait(ctx, b, "compaction start commit"); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.horizon, s.pending = h, h
 	s.mu.Unlock()
+
+	snap := s.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
 
-	start := time.Now()
-	b := s.db.NewBatch()
-	owned := true // until handed to commitWait
+	// Step 2: record chunks.
+	maxDeletes, maxBytes := s.compactChunkDeletes, s.compactChunkBytes
+	b = s.db.NewBatch()
+	owned := true
 	defer func() {
 		if owned {
 			_ = b.Close()
 		}
 	}()
-	var stats struct{ records, coverage, manifests int }
-	del := func(keys ...[]byte) error {
-		for _, k := range keys {
-			if err := b.Delete(k, nil); err != nil {
-				return fmt.Errorf("pebblestore: compact: %w", err)
-			}
+	pendingDeletes := 0
+	flush := func() error {
+		if pendingDeletes == 0 {
+			return nil
+		}
+		owned = false
+		if err := s.commitWait(ctx, b, "compaction chunk commit"); err != nil {
+			return err
+		}
+		stats.chunks++
+		pendingDeletes = 0
+		b, owned = s.db.NewBatch(), true
+		if s.compactChunkHook != nil {
+			return s.compactChunkHook(stats.chunks)
 		}
 		return nil
 	}
-
-	// Records: walk the time index below the horizon. For each key, every
-	// record older than the newest one below the horizon is dropped; the
-	// newest is dropped too if it is a delete.
-	type latest struct {
-		at      time.Time
-		deleted bool
-	}
-	last := map[model.ObjectKey]latest{}
-	it, err := newIter(ctx, snap, &pebble.IterOptions{
-		LowerBound: []byte{tabIndex},
-		UpperBound: indexKey(horizon),
-	})
-	if err != nil {
-		return err
-	}
-	defer func(it *iter) { _ = it.Close() }(it)
-	n := 0
-	for ok := it.First(); ok; ok = it.Next() {
-		if n++; n%ctxCheckEvery == 0 {
-			if err := ctx.Err(); err != nil {
-				_ = it.Close()
-				return err
-			}
-		}
-		val, err := iterValue(it)
-		var ref indexRef
-		if err == nil {
-			ref, err = decodeIndexRef(it.Key(), val)
-		}
-		if err != nil {
-			_ = it.Close()
+	del := func(vk []byte, t time.Time) error {
+		if err := errors.Join(b.Delete(vk, nil), b.Delete(indexKey(t), nil)); err != nil {
 			return fmt.Errorf("pebblestore: compact: %w", err)
 		}
-		if prev, ok := last[ref.key]; ok {
-			if err := del(versionKey(ref.key, prev.at), indexKey(prev.at)); err != nil {
-				_ = it.Close()
-				return err
-			}
-			stats.records++
+		stats.records++
+		if pendingDeletes++; pendingDeletes >= maxDeletes || b.Len() >= maxBytes {
+			return flush()
 		}
-		last[ref.key] = latest{at: ref.time, deleted: ref.typ == model.ChangeDeleted}
+		return nil
 	}
-	if err := closeIter(it); err != nil {
+	if err := s.sweepVersions(ctx, snap, h, del); err != nil {
 		return err
 	}
-	for k, l := range last {
-		if l.deleted {
-			if err := del(versionKey(k, l.at), indexKey(l.at)); err != nil {
-				return err
-			}
-			stats.records++
-		}
-	}
 
-	// Coverage: keep events from the first one at or after the horizon,
-	// plus the one before it. The search mirrors memstore exactly.
+	// Step 3: coverage and the end of the pending state, in the last batch.
 	resources, err := readResources(ctx, snap)
 	if err != nil {
 		return fmt.Errorf("pebblestore: compact: %w", err)
@@ -133,20 +164,110 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 		if err != nil {
 			return fmt.Errorf("pebblestore: compact: %w", err)
 		}
-		i := sort.Search(len(cs), func(i int) bool { return !cs[i].At.Before(horizon) })
+		// Mirrors memstore: keep from the first event at or after h, plus
+		// the one before it.
+		i := sort.Search(len(cs), func(i int) bool { return !cs[i].At.Before(h) })
 		for _, c := range cs[:max(i-1, 0)] {
-			if err := del(coverageKey(res, c.Seq)); err != nil {
-				return err
+			if err := b.Delete(coverageKey(res, c.Seq), nil); err != nil {
+				return fmt.Errorf("pebblestore: compact: %w", err)
 			}
 			stats.coverage++
 		}
 	}
+	if err := b.Delete(keyCompacting, nil); err != nil {
+		return fmt.Errorf("pebblestore: compact: %w", err)
+	}
+	owned = false
+	if err := s.commitWait(ctx, b, "compaction final commit"); err != nil {
+		return err
+	}
+	stats.chunks++
+	s.mu.Lock()
+	s.pending = time.Time{}
+	s.mu.Unlock()
+	s.log.Info("compacted",
+		"horizon", h, "resumed", resume, "recordsRemoved", stats.records,
+		"coverageRemoved", stats.coverage, "manifestsRemoved", stats.manifests,
+		"batches", stats.chunks+1, "duration", time.Since(start))
+	return nil
+}
 
-	// Manifests older than the horizon: the time index entries they rely on
-	// for (S, T] are being removed, so they would give wrong answers.
-	it, err = newIter(ctx, snap, &pebble.IterOptions{
+// sweepVersions walks the version table of snap object by object and
+// calls del for every version the contract removes at horizon h. Memory
+// is O(1) in the number of objects: versions of one object are adjacent
+// and only the previous version below h is remembered.
+func (s *Store) sweepVersions(ctx context.Context, snap pebbleReader, h time.Time, del func(vk []byte, t time.Time) error) error {
+	it, err := newIter(ctx, snap, &pebble.IterOptions{LowerBound: []byte{tabVersion}, UpperBound: []byte{tabVersion + 1}})
+	if err != nil {
+		return err
+	}
+	defer func(it *iter) { _ = it.Close() }(it)
+	hEnc := appendTime(nil, h)
+	n := 0
+	var prevKey []byte
+	var prevAt time.Time
+	for ok := it.First(); ok; {
+		if n++; n%ctxCheckEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		k := it.Key()
+		if len(k) < 1+timeLen {
+			return corruptf(k, "version key too short")
+		}
+		obj := slices.Clone(k[:len(k)-timeLen])
+		prevKey = prevKey[:0]
+		// Versions of obj below h, oldest first.
+		for ok && len(it.Key()) == len(obj)+timeLen && bytes.HasPrefix(it.Key(), obj) &&
+			bytes.Compare(it.Key()[len(obj):], hEnc) < 0 {
+			t, err := decodeTime(it.Key()[len(obj):])
+			if err != nil {
+				return corruptf(it.Key(), "bad version time: %v", err)
+			}
+			if len(prevKey) > 0 {
+				if err := del(prevKey, prevAt); err != nil {
+					return err
+				}
+			}
+			prevKey, prevAt = append(prevKey[:0], it.Key()...), t
+			ok = it.Next()
+		}
+		if len(prevKey) > 0 {
+			// The newest version below h survives unless it is a delete.
+			// Its value must be read (and validated) to know the type.
+			typ, err := s.versionType(snap, prevKey)
+			if err != nil {
+				return err
+			}
+			if typ == model.ChangeDeleted {
+				if err := del(prevKey, prevAt); err != nil {
+					return err
+				}
+			}
+		}
+		ok = it.SeekGE(prefixEnd(obj))
+	}
+	return closeIter(it)
+}
+
+func (s *Store) versionType(r pebbleReader, vk []byte) (model.ChangeType, error) {
+	var typ model.ChangeType
+	found, err := getVersion(r, vk, func(rec model.Record) error {
+		typ = rec.Type
+		return nil
+	})
+	if err == nil && !found {
+		err = corruptf(vk, "version vanished from the compaction snapshot")
+	}
+	return typ, mapPebbleErr(err)
+}
+
+// addManifestDeletes adds deletion of every manifest older than h to b.
+func (s *Store) addManifestDeletes(ctx context.Context, b *pebble.Batch, h time.Time, n *int) error {
+	it, err := newIter(ctx, s.db, &pebble.IterOptions{
 		LowerBound: []byte{tabManifest},
-		UpperBound: manifestKey(horizon),
+		UpperBound: manifestKey(h),
 	})
 	if err != nil {
 		return err
@@ -158,33 +279,10 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 			continue
 		}
 		cp := append([]byte{tabChunk}, mk[1:]...)
-		if err := del(mk); err != nil {
-			_ = it.Close()
-			return err
-		}
-		if err := b.DeleteRange(cp, prefixEnd(cp), nil); err != nil {
-			_ = it.Close()
+		if err := errors.Join(b.Delete(mk, nil), b.DeleteRange(cp, prefixEnd(cp), nil)); err != nil {
 			return fmt.Errorf("pebblestore: compact: %w", err)
 		}
-		stats.manifests++
+		*n++
 	}
-	if err := closeIter(it); err != nil {
-		return err
-	}
-
-	if err := b.Set(keyHorizon, seal(keyHorizon, encodeTimeValue(horizon)), nil); err != nil {
-		return fmt.Errorf("pebblestore: compact: %w", err)
-	}
-	owned = false
-	if err := s.commitWait(ctx, b, "compaction commit"); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.horizon = horizon
-	s.mu.Unlock()
-	s.log.Info("compacted",
-		"horizon", horizon, "recordsRemoved", stats.records,
-		"coverageRemoved", stats.coverage, "manifestsRemoved", stats.manifests,
-		"keysBelowHorizon", len(last), "duration", time.Since(start))
-	return nil
+	return closeIter(it)
 }

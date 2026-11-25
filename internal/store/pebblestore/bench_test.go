@@ -7,9 +7,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -691,4 +693,90 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(ds.dir)
 	}
 	os.Exit(code)
+}
+
+// BenchmarkCompactLargeHeap measures peak Go heap during one large
+// compaction: 100k pod keys with 3 records each (the last a delete for
+// two thirds of them), all below the horizon, as after a long outage.
+// Run with -benchtime 1x.
+func BenchmarkCompactLargeHeap(b *testing.B) {
+	const keys, versions = 100_000, 3
+	ctx := context.Background()
+	for b.Loop() {
+		b.StopTimer()
+		s, err := Open(b.TempDir(), Options{Logger: testLogger(), SnapshotInterval: -1})
+		if err != nil {
+			b.Fatal(err)
+		}
+		body := []byte(strings.Repeat(`{"status":{"phase":"Running"}}`, 30))
+		at := benchStart
+		var batch []store.Entry
+		for v := range versions {
+			for k := range keys {
+				typ := model.ChangeModified
+				if v == 0 {
+					typ = model.ChangeAdded
+				} else if v == versions-1 && k%3 != 0 {
+					typ = model.ChangeDeleted
+				}
+				at = at.Add(time.Millisecond)
+				batch = append(batch, store.Entry{Record: &model.Record{ObservedAt: at,
+					Key: model.ObjectKey{Resource: "v1/pods", Namespace: nsName(k % 50), Name: fmt.Sprintf("pod-%07d-%s", k, strings.Repeat("x", 20))},
+					UID: "u", Type: typ, Origin: model.OriginWatch, Object: body}})
+				if len(batch) == 2000 {
+					if err := s.Write(ctx, batch); err != nil {
+						b.Fatal(err)
+					}
+					batch = nil
+				}
+			}
+		}
+		if err := s.Flush(); err != nil {
+			b.Fatal(err)
+		}
+		peak := measurePeakHeap(func() {
+			b.StartTimer()
+			if err := s.Compact(ctx, at.Add(time.Second)); err != nil {
+				b.Fatal(err)
+			}
+			b.StopTimer()
+		})
+		b.ReportMetric(float64(peak)/(1<<20), "peak-heap-MB")
+		b.ReportMetric(keys*versions, "records")
+		_ = s.Close()
+		b.StartTimer()
+	}
+}
+
+// measurePeakHeap runs fn and returns the peak live heap above the
+// baseline taken just before it, sampled every 2ms.
+func measurePeakHeap(fn func()) uint64 {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	base := ms.HeapAlloc
+	var peak atomic.Uint64
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(2 * time.Millisecond)
+		defer t.Stop()
+		for {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			if m.HeapAlloc > base && m.HeapAlloc-base > peak.Load() {
+				peak.Store(m.HeapAlloc - base)
+			}
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	fn()
+	close(stop)
+	<-done
+	return peak.Load()
 }

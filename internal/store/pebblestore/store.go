@@ -71,6 +71,11 @@ type Options struct {
 
 	// fs, if set, replaces the OS filesystem (tests inject I/O failures).
 	fs vfs.FS
+	// Compaction chunk bounds and a hook called after each intermediate
+	// chunk commit (tests use it to simulate a crash between chunks).
+	compactChunkDeletes int
+	compactChunkBytes   int
+	compactChunkHook    func(chunk int) error
 }
 
 // Store is a durable store.Store backed by Pebble. It is safe for
@@ -107,6 +112,12 @@ type Store struct {
 	views     map[*view]struct{}
 	// lastManifest is the time of the newest snapshot manifest (zero: none).
 	lastManifest time.Time
+	// pending is the horizon of an unfinished compaction (zero: none).
+	pending time.Time
+
+	compactChunkDeletes int
+	compactChunkBytes   int
+	compactChunkHook    func(chunk int) error
 
 	// maintMu serializes Compact and Snapshot, which both rewrite manifests.
 	maintMu sync.Mutex
@@ -162,6 +173,16 @@ func Open(dir string, opts Options) (*Store, error) {
 
 		writeSem:     make(chan struct{}, 1),
 		closeTimeout: opts.CloseTimeout,
+
+		compactChunkDeletes: opts.compactChunkDeletes,
+		compactChunkBytes:   opts.compactChunkBytes,
+		compactChunkHook:    opts.compactChunkHook,
+	}
+	if s.compactChunkDeletes <= 0 {
+		s.compactChunkDeletes = defaultCompactChunkDeletes
+	}
+	if s.compactChunkBytes <= 0 {
+		s.compactChunkBytes = defaultCompactChunkBytes
 	}
 	if s.closeTimeout <= 0 {
 		s.closeTimeout = DefaultCloseTimeout
@@ -175,6 +196,9 @@ func Open(dir string, opts Options) (*Store, error) {
 		"format", FormatVersion, "seq", s.seq, "lastTime", s.lastTime,
 		"horizon", s.horizon, "heartbeat", s.heartbeat,
 		"resources", len(s.lastRec), "lastManifest", s.lastManifest)
+	if !s.pending.IsZero() {
+		log.Warn("a compaction was interrupted; the next Compact finishes it", "horizon", s.pending)
+	}
 
 	interval := opts.SnapshotInterval
 	if interval == 0 {
@@ -439,7 +463,7 @@ func (s *Store) load() error {
 	for _, m := range []struct {
 		key []byte
 		dst *time.Time
-	}{{keyHorizon, &s.horizon}, {keyHeartbeat, &s.heartbeat}} {
+	}{{keyHorizon, &s.horizon}, {keyHeartbeat, &s.heartbeat}, {keyCompacting, &s.pending}} {
 		val, ok, err := s.getValue(m.key)
 		if err != nil {
 			return err
