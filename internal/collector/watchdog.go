@@ -36,13 +36,22 @@ type watchdog struct {
 	last time.Time // last on-time observation; zero until run starts
 }
 
-// run ticks until ctx is done.
-func (d *watchdog) run(ctx context.Context) {
+// start arms the watchdog. Run calls it synchronously, before any
+// reflector or goroutine starts: if the ticker and the first observation
+// were set up inside the run goroutine, a freeze that began before that
+// goroutine was scheduled would go unseen (its first observation would
+// already be after the freeze), and so could a freeze before the ticker
+// existed.
+func (d *watchdog) start(ctx context.Context) clock.Ticker {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.ctx = ctx
 	d.last = d.clock.Now()
-	d.mu.Unlock()
-	t := d.clock.NewTicker(d.interval)
+	return d.clock.NewTicker(d.interval)
+}
+
+// run ticks until ctx is done; t comes from start.
+func (d *watchdog) run(ctx context.Context, t clock.Ticker) {
 	defer t.Stop()
 	for {
 		select {

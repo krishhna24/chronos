@@ -285,15 +285,17 @@ func (c *Collector) Run(ctx context.Context) error {
 	defer rcancel()
 	kctx := klog.NewContext(rctx, logr.FromSlogHandler(c.log.Handler()))
 	var wg sync.WaitGroup
+	if c.wd != nil {
+		ticker := c.wd.start(rctx) // armed before anything can be received
+		wg.Go(func() { c.wd.run(rctx, ticker) })
+	}
+	hbTicker := c.cfg.Clock.NewTicker(c.cfg.HeartbeatInterval)
 	for i, r := range c.res {
 		r.src.ctx = rctx
 		refl := c.reflectors[i]
 		wg.Go(func() { refl.RunWithContext(kctx) })
 	}
-	wg.Go(func() { c.heartbeats(rctx) })
-	if c.wd != nil {
-		wg.Go(func() { c.wd.run(rctx) })
-	}
+	wg.Go(func() { c.heartbeats(rctx, hbTicker) })
 	c.log.Info("collector started", "resources", len(c.res))
 
 	var fatal error
@@ -343,8 +345,9 @@ func (c *Collector) Run(ctx context.Context) error {
 	return fmt.Errorf("collector: shutdown: final writes not completed within %s: %w", c.cfg.ShutdownTimeout, err)
 }
 
-func (c *Collector) heartbeats(ctx context.Context) {
-	t := c.cfg.Clock.NewTicker(c.cfg.HeartbeatInterval)
+// heartbeats runs on t, created synchronously in Run so that a clock
+// moving right after Run starts cannot slip past an uncreated ticker.
+func (c *Collector) heartbeats(ctx context.Context, t clock.Ticker) {
 	defer t.Stop()
 	for {
 		select {
