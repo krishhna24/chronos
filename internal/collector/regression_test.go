@@ -465,15 +465,22 @@ func TestRegressionWatchdogTickerDetectsFreeze(t *testing.T) {
 	waitJournal(t, st, "v1/secrets", "Added/baseline ns/s us", "Start")
 	eventually(t, "sources healthy", func() bool { return h.c.res[0].src.healthy() && h.c.res[1].src.healthy() })
 
+	// A few on-time ticks: the last on-time observation is now later than
+	// both resources' continuity bound (their LIST; idle since, reliability
+	// D3). End goes at that earlier bound but must still name the cause.
+	for range 3 {
+		clk.Step(time.Second)
+		time.Sleep(20 * time.Millisecond)
+	}
 	clk.SetTime(t0.Add(2 * time.Minute)) // the process did not run for two minutes
 	for _, id := range []string{cmID, "v1/secrets"} {
 		eventually(t, id+" relisted after the freeze", func() bool { return len(coverageOf(t, st, id)) == 3 })
 		cov := coverageOf(t, st, id)
-		if cov[1].Type != model.CoverageEnd || cov[1].Reason != reasonProcessStall || cov[1].At.After(t0.Add(time.Second)) {
+		if cov[1].Type != model.CoverageEnd || cov[1].Reason != reasonProcessStall || cov[1].At.After(t0.Add(4*time.Second)) {
 			t.Fatalf("%s: End = %+v, want %q before the freeze", id, cov[1], reasonProcessStall)
 		}
 	}
-	if hb, _ := st.Heartbeat(context.Background()); hb.After(t0.Add(time.Second)) {
+	if hb, _ := st.Heartbeat(context.Background()); hb.After(t0.Add(4 * time.Second)) {
 		t.Fatalf("heartbeat %v written for the frozen window", hb)
 	}
 }

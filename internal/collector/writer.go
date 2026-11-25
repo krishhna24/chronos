@@ -550,9 +550,16 @@ func (w *writer) handleReplace(ctx context.Context, it item) error {
 	entries := make([]store.Entry, 0, len(keys)+2)
 	ended := r.covOpen
 	if ended {
+		// The End goes at the earlier bound; the reason is the writer's
+		// when it declared the loss (the cause), even if the source's
+		// bound is earlier (an idle resource's last event, reliability
+		// D3), so a process stall is not reported as a plain relist.
 		lostAt, reason := it.lostAt, reasonRelist
-		if !r.lostAt.IsZero() && (lostAt.IsZero() || !r.lostAt.After(lostAt)) {
-			lostAt, reason = r.lostAt, r.lostReason
+		if !r.lostAt.IsZero() {
+			reason = r.lostReason
+			if lostAt.IsZero() || r.lostAt.Before(lostAt) {
+				lostAt = r.lostAt
+			}
 		}
 		entries = append(entries, coverage(r.id, model.CoverageEnd, r.endAt(lostAt), reason))
 	}
