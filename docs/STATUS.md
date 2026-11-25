@@ -73,6 +73,18 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
 | – | low | Overflowing relative time reported as future | cli | fixed (37c505b) |
 | – | low | /readyz ignores collector sync and store health | orchestrator | decided (d63b6c3): ready = store readable; sync deliberately excluded |
 
+## Independent review round 2 (2026-11-25) — remediation
+| # | Severity | Finding | Owner | Status |
+| --- | --- | --- | --- | --- |
+| 1 | high | SST corruption panics readers (Fatalf) and leaks iterators; Close then panics | storage | fixing |
+| 2 | medium | Compact ignores ctx on hung commit; main waited for retention before Store.Close | storage + orchestrator | shutdown order fixed (this commit); store ctx handling in progress |
+| 3 | medium | Compact builds one unbounded batch (OOM risk after long outage) | storage | fixing (chunked compaction) |
+| 4 | medium | Actions/base images pinned by tag; curl\|sh lint install; no SBOM/provenance | devops | fixing |
+| 5 | low-med | RBAC grants secrets list/watch even when secrets not recorded | devops | fixing |
+| 6 | low | Pebble background Fatalf crashes process; doc overclaims | storage | fixing (doc) |
+| 7 | low | Chart args unquoted; large ints render as floats | devops | fixing |
+| 8 | low | Close-after-timeout returns nil; qps/burst/interval unvalidated | storage + orchestrator | flags fixed (this commit) |
+
 ## Known defects / follow-ups
 - Cluster-wide List at 10k live + 30k dead keys takes ~580 ms (target 100 ms);
   paging mitigates. Option: ListOptions.IncludeDeleted so the store can skip
