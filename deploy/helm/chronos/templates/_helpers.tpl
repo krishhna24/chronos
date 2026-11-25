@@ -119,7 +119,21 @@ name. Unknown names fail rendering.
 {{- end }}
 
 {{/*
-Server arguments generated from .Values.config.
+A scalar as a string without float formatting: Helm reads YAML numbers as
+float64, so 1000000 would otherwise print as 1e+06.
+*/}}
+{{- define "chronos.str" -}}
+{{- if and (kindIs "float64" .) (eq (float64 (int64 .)) .) }}
+{{- printf "%d" (int64 .) }}
+{{- else }}
+{{- toString . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Server arguments generated from .Values.config. Every argument is quoted
+and integers are formatted with %d, so values such as "a#b" or 1000000
+reach the server unchanged.
 */}}
 {{- define "chronos.args" -}}
 {{- $c := .Values.config }}
@@ -131,33 +145,33 @@ Server arguments generated from .Values.config.
 {{- fail "set recorded types with config.resources, not extraArgs: the chart derives RBAC from it" }}
 {{- end }}
 {{- end }}
-- --listen=:{{ .Values.containerPort }}
-- --storage={{ $c.storage }}
-- --data-dir=/var/lib/chronos
-- --retention={{ $c.retention }}
-- --retention-interval={{ $c.retentionInterval }}
+- {{ printf "--listen=:%d" (int64 .Values.containerPort) | quote }}
+- {{ printf "--storage=%s" $c.storage | quote }}
+- "--data-dir=/var/lib/chronos"
+- {{ printf "--retention=%s" (include "chronos.str" $c.retention) | quote }}
+- {{ printf "--retention-interval=%s" (include "chronos.str" $c.retentionInterval) | quote }}
 {{- if $c.resources }}
 {{- $ids := list }}
 {{- range (include "chronos.selectedTypes" . | fromJson).types }}
 {{- $ids = append $ids .id }}
 {{- end }}
-- --resources={{ join "," $ids }}
+- {{ printf "--resources=%s" (join "," $ids) | quote }}
 {{- end }}
 {{- with $c.redactAnnotations }}
-- --redact-annotations={{ join "," . }}
+- {{ printf "--redact-annotations=%s" (join "," .) | quote }}
 {{- end }}
 {{- with $c.secretAnnotationAllowlist }}
-- --secret-annotation-allowlist={{ join "," . }}
+- {{ printf "--secret-annotation-allowlist=%s" (join "," .) | quote }}
 {{- end }}
-- --stall-timeout={{ $c.stallTimeout }}
+- {{ printf "--stall-timeout=%s" (include "chronos.str" $c.stallTimeout) | quote }}
 {{- if $c.keepManagedFields }}
-- --keep-managed-fields
+- "--keep-managed-fields"
 {{- end }}
-- --log-level={{ $c.logLevel }}
-- --log-format={{ $c.logFormat }}
-- --kube-api-qps={{ $c.kubeApiQPS }}
-- --kube-api-burst={{ $c.kubeApiBurst }}
+- {{ printf "--log-level=%s" $c.logLevel | quote }}
+- {{ printf "--log-format=%s" $c.logFormat | quote }}
+- {{ printf "--kube-api-qps=%s" (include "chronos.str" $c.kubeApiQPS) | quote }}
+- {{ printf "--kube-api-burst=%d" (int64 $c.kubeApiBurst) | quote }}
 {{- range .Values.extraArgs }}
-- {{ . }}
+- {{ include "chronos.str" . | quote }}
 {{- end }}
 {{- end }}
