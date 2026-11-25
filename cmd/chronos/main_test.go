@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/krishhna24/chronos/internal/collector"
 	"testing"
 	"time"
 )
@@ -38,5 +39,26 @@ func TestSelectResources(t *testing.T) {
 	}
 	if _, err := selectResources("nodes"); err == nil {
 		t.Error("unsupported type accepted")
+	}
+}
+
+type fakeStatus []collector.ResourceStatus
+
+func (f fakeStatus) Status() []collector.ResourceStatus { return f }
+
+func TestLiveCoverage(t *testing.T) {
+	lost := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	f := liveCoverage(fakeStatus{
+		{Resource: "v1/pods", LostAt: &lost},
+		{Resource: "v1/configmaps"},
+	})
+	if at, ok := f("v1/pods"); !ok || !at.Equal(lost) {
+		t.Errorf("pods: %v %v, want %v true", at, ok, lost)
+	}
+	if _, ok := f("v1/configmaps"); ok {
+		t.Error("configmaps reported lost without LostAt")
+	}
+	if _, ok := f("v1/secrets"); ok {
+		t.Error("unknown resource reported lost")
 	}
 }

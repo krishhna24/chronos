@@ -229,7 +229,9 @@ func run(args []string) error {
 		return err
 	}
 
-	engine := query.New(st, clk)
+	// ADR 0007: a continuity loss the collector could not yet persist
+	// (store unwritable, process stall) is shown as a gap immediately.
+	engine := query.New(st, clk, query.WithLiveCoverage(liveCoverage(col)))
 	var webFS = web.FS()
 	if !web.Built() {
 		log.Warn("dashboard assets not built; serving placeholder page (run make web)")
@@ -284,6 +286,21 @@ func run(args []string) error {
 	closeStore()
 	retention.Wait()
 	return runErr
+}
+
+// liveCoverage adapts the collector's in-memory loss state to the query
+// overlay. It can only turn observed answers into gaps.
+func liveCoverage(col interface {
+	Status() []collector.ResourceStatus
+}) query.LiveCoverage {
+	return func(resource string) (time.Time, bool) {
+		for _, s := range col.Status() {
+			if s.Resource == resource && s.LostAt != nil {
+				return *s.LostAt, true
+			}
+		}
+		return time.Time{}, false
+	}
 }
 
 func storeReadable(st store.Store) error {
