@@ -7,7 +7,10 @@ package collector
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -267,6 +270,12 @@ func TestRegressionStallEndsCoverage(t *testing.T) {
 		return src.waiting
 	})
 	clk.Step(6 * time.Second) // the stall outlasts StallTimeout
+	// D2: the writer is stuck, so the End cannot be written yet, but the
+	// status already reports the loss.
+	eventually(t, "LostAt while the writer is stuck", func() bool {
+		s := status(h.c, cmID)
+		return s.LostAt != nil && s.LostAt.Equal(t1)
+	})
 	time.Sleep(20 * time.Millisecond)
 	fs.mu.Lock()
 	fs.gate = nil
@@ -330,4 +339,197 @@ func TestRegressionDeleteWithUnknownUID(t *testing.T) {
 	// The key is absent afterwards: a later Add is a fresh Added.
 	w.Add(srv.set(cm("ns", "a", "uc", "1")))
 	waitJournal(t, st, cmID, "Added/baseline ns/a ua", "Start", "Deleted/resync ns/a ua", "Added/watch ns/a uc")
+}
+
+// captureHandler records log records for assertions.
+type captureHandler struct {
+	mu   *sync.Mutex
+	recs *[]slog.Record
+}
+
+func newCapture() (*slog.Logger, func() []slog.Record) {
+	h := captureHandler{mu: &sync.Mutex{}, recs: &[]slog.Record{}}
+	return slog.New(h), func() []slog.Record {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return slices.Clone(*h.recs)
+	}
+}
+
+func (h captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	*h.recs = append(*h.recs, r.Clone())
+	return nil
+}
+func (h captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// listApplied returns the coverageEnded attribute of every "list applied"
+// log record, in order.
+func listApplied(recs []slog.Record) []bool {
+	var out []bool
+	for _, r := range recs {
+		if r.Message != "list applied" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "coverageEnded" {
+				out = append(out, a.Value.Bool())
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// D4: "list applied" must report coverageEnded only when the batch held
+// an End. A batch of just [Start] (empty or unchanged LIST) does not.
+func TestRegressionListAppliedCoverageEndedAttr(t *testing.T) {
+	st := memstore.New()
+	clk := testingclock.NewFakeClock(t0)
+	srv := newServer(configmaps) // empty LIST: batch is [Start]
+	log, logs := newCapture()
+	h := start(t, st, clk, []*fakeServer{srv}, func(c *Config) { c.Logger = log })
+	w := srv.watcher(t)
+	waitJournal(t, st, cmID, "Start")
+	eventually(t, "source healthy", h.c.res[0].src.healthy)
+	w.Error(&metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonExpired})
+	waitJournal(t, st, cmID, "Start", "End", "Start") // relist: [End, Start]
+	eventually(t, "two list applied logs", func() bool { return len(listApplied(logs())) == 2 })
+	if got := listApplied(logs()); got[0] || !got[1] {
+		t.Fatalf("coverageEnded = %v, want [false true]", got)
+	}
+}
+
+// D1 (ADR 0007 §1), receipt path: the process freezes, then the watch
+// delivers the backlog. The first event received after the freeze trips
+// the watchdog before it is queued, so no late-stamped change is recorded
+// as observed: coverage ends at the last on-time observation and the
+// relist re-derives the backlog as resync.
+func TestRegressionWatchdogFirstEventAfterFreeze(t *testing.T) {
+	st := memstore.New()
+	clk := testingclock.NewFakeClock(t0)
+	srv := newServer(configmaps, cm("ns", "a", "ua", "1"))
+	h := start(t, st, clk, []*fakeServer{srv}, func(c *Config) {
+		c.WatchdogInterval = time.Hour // only receipts observe in this test
+		c.HeartbeatInterval = time.Hour
+		c.StallTimeout = 5 * time.Second
+	})
+	w := srv.watcher(t)
+	waitJournal(t, st, cmID, "Added/baseline ns/a ua", "Start")
+	eventually(t, "source healthy", h.c.res[0].src.healthy)
+
+	t1 := t0.Add(time.Second)
+	clk.SetTime(t1)
+	w.Modify(srv.set(cm("ns", "a", "ua", "2")))
+	waitJournal(t, st, cmID, "Added/baseline ns/a ua", "Start", "Modified/watch ns/a ua")
+
+	// Frozen for a minute while the object keeps changing; on resume the
+	// backlog arrives.
+	clk.SetTime(t0.Add(time.Minute))
+	w.Modify(srv.set(cm("ns", "a", "ua", "3")))
+	w.Modify(srv.set(cm("ns", "a", "ua", "4")))
+
+	waitJournal(t, st, cmID, "Added/baseline ns/a ua", "Start", "Modified/watch ns/a ua",
+		"End", "Modified/resync ns/a ua", "Start")
+	cov := coverageOf(t, st, cmID)
+	if cov[1].Reason != reasonProcessStall || cov[1].At.After(t1.Add(time.Microsecond)) {
+		t.Fatalf("End = %+v, want reason %q at the last on-time observation %v", cov[1], reasonProcessStall, t1)
+	}
+	recs := recordsOf(t, st, cmID)
+	if !strings.Contains(string(recs[2].Object), `"value":"4"`) {
+		t.Fatalf("resync must carry the state after the freeze: %s", recs[2].Object)
+	}
+	for _, r := range recs {
+		if r.Origin == model.OriginWatch && r.ObservedAt.After(t1.Add(time.Microsecond)) {
+			t.Fatalf("late watch record recorded as observed at %v", r.ObservedAt)
+		}
+	}
+	eventually(t, "healthy again", h.c.res[0].src.healthy)
+}
+
+// D1, ticker path: a freeze with no traffic is detected by the 1 s tick
+// (and the late heartbeat), ending every resource's coverage.
+func TestRegressionWatchdogTickerDetectsFreeze(t *testing.T) {
+	st := memstore.New()
+	clk := testingclock.NewFakeClock(t0)
+	s1 := newServer(configmaps, cm("ns", "a", "ua", "1"))
+	s2 := newServer(secretsRT, cm("ns", "s", "us", ""))
+	h := start(t, st, clk, []*fakeServer{s1, s2}, func(c *Config) {
+		c.WatchdogInterval = time.Second
+		c.StallTimeout = 5 * time.Second
+	})
+	waitJournal(t, st, cmID, "Added/baseline ns/a ua", "Start")
+	waitJournal(t, st, "v1/secrets", "Added/baseline ns/s us", "Start")
+	eventually(t, "sources healthy", func() bool { return h.c.res[0].src.healthy() && h.c.res[1].src.healthy() })
+
+	// A few on-time ticks: the last on-time observation is now later than
+	// both resources' continuity bound (their LIST; idle since, reliability
+	// D3). End goes at that earlier bound but must still name the cause.
+	for range 3 {
+		clk.Step(time.Second)
+		time.Sleep(20 * time.Millisecond)
+	}
+	clk.SetTime(t0.Add(2 * time.Minute)) // the process did not run for two minutes
+	for _, id := range []string{cmID, "v1/secrets"} {
+		eventually(t, id+" relisted after the freeze", func() bool { return len(coverageOf(t, st, id)) == 3 })
+		cov := coverageOf(t, st, id)
+		if cov[1].Type != model.CoverageEnd || cov[1].Reason != reasonProcessStall || cov[1].At.After(t0.Add(4*time.Second)) {
+			t.Fatalf("%s: End = %+v, want %q before the freeze", id, cov[1], reasonProcessStall)
+		}
+	}
+	if hb, _ := st.Heartbeat(context.Background()); hb.After(t0.Add(4 * time.Second)) {
+		t.Fatalf("heartbeat %v written for the frozen window", hb)
+	}
+}
+
+// D2 (ADR 0007 §2): while the store cannot persist the End, the status
+// exposes the in-memory loss (LostAt) and the write error; once the End
+// is committed LostAt is cleared.
+func TestRegressionStatusLostAtUntilEndDurable(t *testing.T) {
+	fs := &failingStore{Store: memstore.New()}
+	clk := testingclock.NewFakeClock(t0)
+	srv := newServer(configmaps, cm("ns", "a", "ua", "1"))
+	h := start(t, fs, clk, []*fakeServer{srv}, func(c *Config) { c.WriteRetryTimeout = time.Second })
+	w := srv.watcher(t)
+	waitJournal(t, fs, cmID, "Added/baseline ns/a ua", "Start")
+	if s := status(h.c, cmID); s.LostAt != nil || s.LastWriteError != "" || s.LastWriteErrorAt != nil {
+		t.Fatalf("healthy status: %+v", s)
+	}
+
+	fs.fail.Store(true)
+	t1 := t0.Add(time.Minute)
+	clk.SetTime(t1)
+	writes := fs.writes.Load()
+	w.Modify(srv.set(cm("ns", "a", "ua", "2")))
+	eventually(t, "first failed write", func() bool { return fs.writes.Load() > writes })
+	eventually(t, "write error in status", func() bool { return status(h.c, cmID).LastWriteError != "" })
+	if s := status(h.c, cmID); !strings.Contains(s.LastWriteError, errDisk.Error()) || s.LastWriteErrorAt == nil {
+		t.Fatalf("status: %+v", s)
+	}
+	// The writer gives up; coverage is lost in memory but the End cannot
+	// be written while the store keeps failing.
+	eventually(t, "LostAt set", func() bool {
+		clk.Step(time.Second)
+		return status(h.c, cmID).LostAt != nil
+	})
+	s := status(h.c, cmID)
+	if s.LostAt.After(t1) || !s.CoverageOpen || s.Synced {
+		t.Fatalf("status while End not durable: %+v (LostAt %v)", s, *s.LostAt)
+	}
+	if cov := coverageOf(t, fs, cmID); len(cov) != 1 {
+		t.Fatalf("End must not be durable yet: %+v", cov)
+	}
+
+	fs.fail.Store(false)
+	eventually(t, "End committed and LostAt cleared", func() bool {
+		clk.Step(time.Second)
+		s := status(h.c, cmID)
+		return len(coverageOf(t, fs, cmID)) == 3 && s.LostAt == nil && s.Synced
+	})
+	if s := status(h.c, cmID); s.LastWriteError == "" {
+		t.Fatal("LastWriteError must persist after recovery")
+	}
 }

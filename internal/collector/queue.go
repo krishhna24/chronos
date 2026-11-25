@@ -18,6 +18,7 @@ const (
 	itemReplace
 	itemHeartbeat
 	itemShutdown
+	itemProcessStall // watchdog: process did not run; lostAt = last on-time tick
 )
 
 // item is one unit of work for the writer. Items are processed strictly in
@@ -40,7 +41,9 @@ type item struct {
 
 	// itemReplace
 	list   []normalize.Result
-	lostAt time.Time // source's continuity bound when the LIST was applied
+	lostAt time.Time // source's continuity bound when the LIST was applied (itemProcessStall: last on-time tick)
+
+	gen uint64 // itemReplace: source.listGen when the LIST started
 
 	// itemHeartbeat
 	healthy bool

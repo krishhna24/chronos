@@ -99,6 +99,13 @@ func (g *gateLW) ListWithContext(ctx context.Context, o metav1.ListOptions) (run
 	if err := g.hold(ctx); err != nil {
 		return nil, err
 	}
+	// Whether the paused stream ends with an error event (relist at once)
+	// or cleanly (resume attempt) is up to the client. If the reflector
+	// is already relisting, that is the forced gap: don't force a second
+	// one, whose window would swallow the test's next change.
+	g.mu.Lock()
+	g.expire = false
+	g.mu.Unlock()
 	obj, err := g.inner.ListWithContext(ctx, o)
 	if l, ok := obj.(*metav1.PartialObjectMetadataList); ok && len(l.Items) > 0 {
 		g.listTM.CompareAndSwap(nil, l.Items[0].APIVersion+"/"+l.Items[0].Kind)

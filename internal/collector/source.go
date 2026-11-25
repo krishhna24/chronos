@@ -66,6 +66,15 @@ type source struct {
 	stalled         bool // an item waited > stallTimeout; cleared by relistDone
 	dropped         bool // an item was received but never accepted (shutdown)
 	healthyAtStop   bool
+	// relistGen counts forced-relist requests; listGen is its value when
+	// the LIST in progress started. A Replace satisfies the pending
+	// request only if its LIST started after it (listGen == relistGen).
+	relistGen, listGen uint64
+	// lossAt: continuity lost here (queue stall, process stall) and not
+	// yet known to be durable as an End. Reported in ResourceStatus.LostAt.
+	lossAt time.Time
+
+	wd *watchdog // nil: disabled
 }
 
 func newSource(res *resource, lw cache.ListerWatcher, q *queue, c clock.Clock, stall time.Duration, norm normalize.Options, log *slog.Logger) *source {
@@ -134,6 +143,7 @@ func (s *source) advance(t time.Time) {
 func (s *source) requestRelist() {
 	s.mu.Lock()
 	s.relist = true
+	s.relistGen++
 	p := s.cur
 	s.mu.Unlock()
 	if p != nil {
@@ -141,12 +151,49 @@ func (s *source) requestRelist() {
 	}
 }
 
-// relistDone is called by the writer once a Replace has been applied: any
-// still-pending forced relist is no longer needed.
-func (s *source) relistDone() {
+// relistDone is called by the writer once a Replace whose LIST started at
+// generation gen has been applied. A pending forced relist (or stall) is
+// satisfied only by a LIST that started after it was requested; a LIST
+// already in progress or queued when, say, the watchdog tripped does not
+// count.
+func (s *source) relistDone(gen uint64) {
 	s.mu.Lock()
-	s.relist = false
-	s.stalled = false
+	if gen == s.relistGen {
+		s.relist = false
+		s.stalled = false
+	}
+	s.mu.Unlock()
+}
+
+// processStalled is called by the watchdog: continuity was lost at at.
+func (s *source) processStalled(at time.Time) {
+	s.mu.Lock()
+	s.stalled = true
+	s.setLossLocked(at)
+	s.mu.Unlock()
+	s.requestRelist()
+}
+
+func (s *source) setLossLocked(at time.Time) {
+	if s.lossAt.IsZero() || at.Before(s.lossAt) {
+		s.lossAt = at
+	}
+}
+
+// loss returns the source-side continuity loss not yet ended in the store.
+func (s *source) loss() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lossAt
+}
+
+// endCommitted is called once an End at endAt is durable: a loss at or
+// before it is now recorded in the store.
+func (s *source) endCommitted(endAt time.Time) {
+	s.mu.Lock()
+	if !s.lossAt.IsZero() && !s.lossAt.After(endAt) {
+		s.lossAt = time.Time{}
+	}
 	s.mu.Unlock()
 }
 
@@ -164,8 +211,10 @@ func (s *source) streamEnded(p *proxy) {
 // the heartbeat relies on (see Collector.heartbeats).
 func (s *source) enqueue(it item, stallable bool) bool {
 	it.res = s.res
+	now := s.clock.Now()
+	s.wd.observe(now) // may trip the watchdog before this item is queued
 	s.mu.Lock()
-	it.at = s.clock.Now()
+	it.at = now
 	s.waiting = true
 	s.mu.Unlock()
 	var stall time.Duration
@@ -177,6 +226,7 @@ func (s *source) enqueue(it item, stallable bool) bool {
 			"resource", s.res.id, "waitingSince", it.at, "stallTimeout", s.stallTimeout)
 		s.mu.Lock()
 		s.stalled = true
+		s.setLossLocked(it.at)
 		s.mu.Unlock()
 		s.requestRelist()
 	})
@@ -235,6 +285,9 @@ func (l sourceLW) IsWatchListSemanticsUnSupported() bool { return l.s.unsupporte
 func (l sourceLW) ListWithContext(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 	s := l.s
 	s.mu.Lock()
+	if !s.awaitingReplace {
+		s.listGen = s.relistGen
+	}
 	s.awaitingReplace = true
 	s.mu.Unlock()
 	obj, err := s.inner.ListWithContext(ctx, opts)
@@ -257,6 +310,9 @@ func (l sourceLW) WatchWithContext(ctx context.Context, opts metav1.ListOptions)
 	if opts.SendInitialEvents != nil && *opts.SendInitialEvents {
 		// Streaming list (WatchList): the initial events go to the
 		// reflector's temporary store and end in one Replace.
+		if !s.awaitingReplace {
+			s.listGen = s.relistGen
+		}
 		s.awaitingReplace = true
 	}
 	s.mu.Unlock()
@@ -380,13 +436,14 @@ func (st sourceStore) Replace(list []any, _ string) error {
 	}
 	s.mu.Lock()
 	lostAt := s.contUntil
+	gen := s.listGen
 	s.awaitingReplace = false
 	s.replaced = true
 	s.mu.Unlock()
 
 	// A LIST is a snapshot, not a stream: waiting for space loses nothing,
 	// so it is not subject to the stall rule.
-	if !s.enqueue(item{kind: itemReplace, list: results, lostAt: lostAt}, false) {
+	if !s.enqueue(item{kind: itemReplace, list: results, lostAt: lostAt, gen: gen}, false) {
 		return s.ctx.Err() // shutting down; the reflector is exiting anyway
 	}
 	return nil
