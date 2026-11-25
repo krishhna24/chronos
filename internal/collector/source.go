@@ -66,6 +66,7 @@ type source struct {
 	stalled         bool // an item waited > stallTimeout; cleared by relistDone
 	dropped         bool // an item was received but never accepted (shutdown)
 	healthyAtStop   bool
+	acceptedEvents  uint64 // watch events accepted by the queue (tests, debugging)
 	// relistGen counts forced-relist requests; listGen is its value when
 	// the LIST in progress started. A Replace satisfies the pending
 	// request only if its LIST started after it (listGen == relistGen).
@@ -149,6 +150,21 @@ func (s *source) requestRelist() {
 	if p != nil {
 		p.Stop()
 	}
+}
+
+// startListLocked marks the start of a LIST or streaming list. A LIST
+// that starts after a forced-relist request is that relist, so the
+// request is consumed here. Leaving it for the next Watch call (as when
+// the reflector relists on its own, e.g. after VeryShortWatchError,
+// without calling Watch) would fail that Watch with 410 and force a
+// second, spurious relist, with an extra End/Start pair, whenever the
+// writer had not yet applied the first LIST.
+func (s *source) startListLocked() {
+	if !s.awaitingReplace {
+		s.listGen = s.relistGen
+		s.relist = false
+	}
+	s.awaitingReplace = true
 }
 
 // relistDone is called by the writer once a Replace whose LIST started at
@@ -241,6 +257,7 @@ func (s *source) enqueue(it item, stallable bool) bool {
 	}
 	if it.kind == itemEvent {
 		s.lastEventAt = it.at
+		s.acceptedEvents++
 	}
 	s.advance(it.at)
 	return true
@@ -285,10 +302,7 @@ func (l sourceLW) IsWatchListSemanticsUnSupported() bool { return l.s.unsupporte
 func (l sourceLW) ListWithContext(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 	s := l.s
 	s.mu.Lock()
-	if !s.awaitingReplace {
-		s.listGen = s.relistGen
-	}
-	s.awaitingReplace = true
+	s.startListLocked()
 	s.mu.Unlock()
 	obj, err := s.inner.ListWithContext(ctx, opts)
 	if err != nil && ctx.Err() == nil {
@@ -310,10 +324,7 @@ func (l sourceLW) WatchWithContext(ctx context.Context, opts metav1.ListOptions)
 	if opts.SendInitialEvents != nil && *opts.SendInitialEvents {
 		// Streaming list (WatchList): the initial events go to the
 		// reflector's temporary store and end in one Replace.
-		if !s.awaitingReplace {
-			s.listGen = s.relistGen
-		}
-		s.awaitingReplace = true
+		s.startListLocked()
 	}
 	s.mu.Unlock()
 

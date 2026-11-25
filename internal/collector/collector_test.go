@@ -488,10 +488,7 @@ func TestBackpressureLosesNothing(t *testing.T) {
 	w := srv.watcher(t)
 	waitJournal(t, fs, cmID, "Added/baseline ns/a ua", "Start")
 
-	gate := make(chan struct{})
-	fs.mu.Lock()
-	fs.gate = gate
-	fs.mu.Unlock()
+	release := fs.block(t)
 	const n = 50
 	for i := 1; i <= n; i++ {
 		w.Modify(srv.set(cm("ns", "a", "ua", strings.Repeat("x", i))))
@@ -502,10 +499,7 @@ func TestBackpressureLosesNothing(t *testing.T) {
 	if got := len(recordsOf(t, fs, cmID)); got != 1 {
 		t.Fatalf("records written while store blocked: %d", got)
 	}
-	fs.mu.Lock()
-	fs.gate = nil
-	fs.mu.Unlock()
-	close(gate)
+	release()
 	eventually(t, "all modifications", func() bool { return len(recordsOf(t, fs, cmID)) == n+1 })
 	if cov := coverageOf(t, fs, cmID); len(cov) != 1 {
 		t.Fatalf("backpressure must not end coverage: %+v", cov)

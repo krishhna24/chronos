@@ -149,7 +149,16 @@
 // A forced relist (write failure, queue stall, process stall) is
 // satisfied only by a LIST that started after the request (a generation
 // counter, not a time, so fake clocks cannot tie). A LIST already in
-// progress or queued when the watchdog tripped does not clear it.
+// progress or queued when the watchdog tripped does not clear it. The
+// request is consumed when such a LIST starts: the reflector may relist
+// on its own (VeryShortWatchError after the forced close) without calling
+// Watch, and a request left pending would then fail the next Watch and
+// force a second, spurious relist with an extra End/Start pair.
+//
+// The watchdog's first observation and ticker, and the heartbeat ticker,
+// are created synchronously in Run before any reflector starts; set up in
+// their goroutines, a freeze (or a fake clock moving) before those
+// goroutines were scheduled went unseen.
 //
 // # Live coverage loss (ADR 0007 §2)
 //
