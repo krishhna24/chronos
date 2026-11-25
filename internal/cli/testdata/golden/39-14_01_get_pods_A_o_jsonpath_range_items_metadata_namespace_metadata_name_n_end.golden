@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+ns/db-0
+ns/web-1
+other/web-2
+--- stderr

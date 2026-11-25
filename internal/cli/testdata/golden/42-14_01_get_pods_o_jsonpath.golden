@@ -1,0 +1,4 @@
+exit 1
+--- stdout
+--- stderr
+error: -o jsonpath needs a template, e.g. -o jsonpath='{.metadata.name}'

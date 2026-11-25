@@ -1,0 +1,7 @@
+exit 0
+--- stdout
+NAME    IMAGE    NODE     MISSING
+db-0    db:v1    node-a   <none>
+web-1   img:v1   node-a   <none>
+web-2   img:v1   node-a   <none>
+--- stderr

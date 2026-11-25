@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+NAME
+web-1
+--- stderr
+Warning: Chronos was not observing pods at 14:05:00 (gap since 14:04:00: watch expired); showing last known state, which may be stale.

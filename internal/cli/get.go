@@ -19,6 +19,7 @@ import (
 type getOptions struct {
 	app         *app
 	output      string
+	tmpl        *templateOutput
 	selector    string
 	allNS       bool
 	showDeleted bool
@@ -26,7 +27,7 @@ type getOptions struct {
 
 func (g *getOptions) addFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.StringVarP(&g.output, "output", "o", "", "Output format: wide, json, yaml or name")
+	f.StringVarP(&g.output, "output", "o", "", "Output format: wide, json, yaml, name, jsonpath=<template> or custom-columns=<spec>")
 	f.StringVarP(&g.selector, "selector", "l", "", "Label selector to filter on, e.g. -l app=web,tier!=db (matched against the historical labels)")
 	f.BoolVarP(&g.allNS, "all-namespaces", "A", false, "List objects across all namespaces")
 	f.BoolVar(&g.showDeleted, "show-deleted", false, "Also list objects that had been deleted by the given time (DELETED column)")
@@ -35,10 +36,16 @@ func (g *getOptions) addFlags(cmd *cobra.Command) {
 // run implements "kubectl at <time> get <type> [name]" and
 // "kubectl at <time> get <type>/<name>".
 func (g *getOptions) run(ctx context.Context, timeArg string, args []string) error {
-	switch g.output {
-	case "", "wide", "json", "yaml", "name":
+	tmpl, err := parseTemplateOutput(g.output)
+	if err != nil {
+		return err
+	}
+	g.tmpl = tmpl
+	switch {
+	case tmpl != nil:
+	case g.output == "", g.output == "wide", g.output == "json", g.output == "yaml", g.output == "name":
 	default:
-		return fmt.Errorf("unable to match a printer suitable for the output format %q, allowed formats are: json,name,wide,yaml", g.output)
+		return fmt.Errorf("unable to match a printer suitable for the output format %q, allowed formats are: custom-columns,json,jsonpath,name,wide,yaml", g.output)
 	}
 	var typ, name string
 	switch {
@@ -124,6 +131,12 @@ func (g *getOptions) getOne(ctx context.Context, c *client, rt api.Resource, ns,
 		g.app.warnf("%s are recorded as metadata only; type and data are not available.", rt.Resource)
 	}
 	w := g.app.o.Out
+	switch {
+	case g.tmpl != nil && g.tmpl.jsonpath != nil:
+		return g.tmpl.printJSONPath(w, st.Object)
+	case g.tmpl != nil:
+		return g.tmpl.printColumns(w, [][]byte{st.Object})
+	}
 	switch g.output {
 	case "json":
 		return writeJSON(w, st.Object)
@@ -152,8 +165,17 @@ func (g *getOptions) getList(ctx context.Context, c *client, rt api.Resource, ns
 	}
 
 	w := g.app.o.Out
-	switch g.output {
-	case "json", "yaml":
+	if g.tmpl != nil && g.tmpl.columns != nil {
+		var objs [][]byte
+		for _, it := range lr.Items {
+			if len(it.Object) > 0 {
+				objs = append(objs, it.Object)
+			}
+		}
+		return g.tmpl.printColumns(w, objs)
+	}
+	switch {
+	case g.output == "json", g.output == "yaml", g.tmpl != nil:
 		items := make([]json.RawMessage, 0, len(lr.Items))
 		for _, it := range lr.Items {
 			if len(it.Object) > 0 {
@@ -169,7 +191,10 @@ func (g *getOptions) getList(ctx context.Context, c *client, rt api.Resource, ns
 		if err != nil {
 			return fmt.Errorf("encode list: %w", err)
 		}
-		if g.output == "json" {
+		switch {
+		case g.tmpl != nil:
+			return g.tmpl.printJSONPath(w, list)
+		case g.output == "json":
 			return writeJSON(w, list)
 		}
 		return writeYAML(w, list)

@@ -53,3 +53,25 @@ func TestTableEscapesRecordedStrings(t *testing.T) {
 		t.Errorf("table has %d lines, want 2 (header + one row): %q", n, out)
 	}
 }
+
+func TestTemplateOutputIsEscaped(t *testing.T) {
+	obj := []byte(`{"metadata":{"name":"x\u001b]0;owned\u0007"},"message":"a\u001b[2Jb"}`)
+	for _, format := range []string{"jsonpath={.metadata.name}", "custom-columns=N:.metadata.name,M:.message"} {
+		tmpl, err := parseTemplateOutput(format)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if tmpl.jsonpath != nil {
+			err = tmpl.printJSONPath(&buf, obj)
+		} else {
+			err = tmpl.printColumns(&buf, [][]byte{obj})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsAny(buf.String(), "\x1b\a") {
+			t.Errorf("%s: raw control characters in %q", format, buf.String())
+		}
+	}
+}

@@ -66,6 +66,14 @@ var goldenCases = []string{
 	"history pods/nope",
 	"resources",
 	"version",
+	// template output (appended so earlier golden files keep their numbers)
+	"14:02:30 get pods web-1 -o jsonpath={.spec.containers[0].image}",
+	"14:01 get pods -A -o jsonpath={range.items[*]}{.metadata.namespace}/{.metadata.name}{\"\\n\"}{end}",
+	"14:01 get pods -A -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image,NODE:.spec.nodeName,MISSING:.status.nope",
+	"14:05 get pods -o custom-columns=NAME:.metadata.name",
+	"14:01 get pods -o jsonpath",
+	"14:01 get pods -o custom-columns=NAME",
+	"14:01 get pods -o jsonpath={.items[",
 }
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9]+`)
