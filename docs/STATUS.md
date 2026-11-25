@@ -104,10 +104,12 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
   time; assigned to collector). Integration-on-kind job skipped (depends on Go job).
 
 ## Known defects / follow-ups
+- Disk full is fail-stop: the store poisons itself on an ambiguous commit
+  failure and the process exits, so history is unreadable until space is
+  freed (no wrong answers). Backlog: read-only degraded mode.
 - Cluster-wide List at 10k live + 30k dead keys takes ~580 ms (target 100 ms);
   paging mitigates. Option: ListOptions.IncludeDeleted so the store can skip
   deleted keys (measured ~2.1x faster).
-- `kubectl at ... -o jsonpath` / `custom-columns` not supported.
 - Not yet tested: end-to-end scale (10k objects through the collector),
   API-server interruption chaos, disk-full, GitHub Actions workflows.
 - memstore View copies the key map (~1 ms per View at 10k keys): fine for tests, not for production (pebblestore is the production path).

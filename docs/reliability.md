@@ -29,7 +29,7 @@ To rerun one: `WORK=<scratch> test/e2e/chaos.sh <scenario>`.
 | 8 | In cluster: `kubectl delete pod --grace-period=0 --force` during a 50/s storm | new pod opens the store, gap, no loss | kubelet still sent SIGTERM: End `shutdown` at 08:55:00.566 (delete 08:55:00.439); new pod's Start 08:55:05.86; 86 resync, 15 gap-miss, LOST 0; verify equal | PASS |
 | 9 | In cluster: `kill -9` of the container process from the node | End `crash-recovery` at the last heartbeat | exit 137; End `crash-recovery` 08:57:05.860 = heartbeat (kill at 08:57:14.31) | PASS |
 | 10a | Disk full, 20/s for 60 s (96 MiB tmpfs filled with `dd`) | writes fail, coverage ends; or no claim beyond what is durable | Pebble kept accepting synced writes into its recycled WAL; only memtable flushes failed (241 `no space left on device`); all 1,199 writes recorded; LOST 0 | PASS |
-| 10b | Disk full, 100/s for 120 s, then free the space | as above; recovery after space is freed | memtables filled about 88 s in, Pebble stalled writes, and the collector's stall rule fired 15 s later, but the End could not be persisted. **While full, the API answered `observed` with 3,621 changes missing.** After the space was freed: End `stall` at 09:03:06.157, Start 09:03:36.68, 300 resync, LOST 0, verify equal | **FAIL during the outage** (D2); recovery PASS |
+| 10b | Disk full, 100/s for 120 s, then free the space | as above; recovery after space is freed | memtables filled about 88 s in, Pebble stalled writes, and the collector's stall rule fired 15 s later, but the End could not be persisted. **While full, the API answered `observed` with 3,621 changes missing.** After the space was freed: End `stall` at 09:03:06.157, Start 09:03:36.68, 300 resync, LOST 0, verify equal | **FAIL during the outage** (D2); recovery PASS. Re-test after ADR 0007: fail-stop (process exits, no stale answers); see D2 |
 | 11 | Retention loop | runs every `--retention-interval` | `compacted` logged every 1 m (1.8–3.1 ms; nothing older than the 1 h minimum horizon); real removal tested on a store copy (12) and by `TestConcurrentWriteViewCompact -race` (pass) | PASS (loop confirmed only) |
 | 12 | Compaction during reads (copy of the 75k-record scale store) | reads unaffected; answers at t ≥ horizon unchanged | Compact 73 ms, 24,289 records removed; 4 concurrent readers, 0 errors, p99 Get 0.56 ms during; 2,000/2,000 probes unchanged | PASS |
 
@@ -183,6 +183,25 @@ by the relist.
   coverage and reports `gap` after the last durable write or heartbeat
   plus a bound. Also expose store write failures as a metric or health
   detail.
+
+**Re-test 2026-11-25 (after ADR 0007 and the round-2 store fixes).**
+`DISK_RATE=100 DISK_SECONDS=120 test/e2e/chaos.sh disk-full`. The
+behaviour changed: when the tmpfs filled, Pebble failed a commit after
+its commit point (`write .../000005.log: no space left on device`). That
+outcome is ambiguous, so the store poisoned itself, the collector
+stopped with `store closed`, and the process exited 1 about 3 s into the
+storm. No query was answered while the store could not write, so no
+stale `observed` answer was served: **no longer FAIL on correctness.**
+In Kubernetes the pod restarts; once space is available the restart
+writes a crash-recovery End and relists (covered by the crash scenarios).
+
+The cost is availability: while the disk stays full the API is down,
+although history before the loss is still valid. A degraded read-only
+mode (keep serving reads from the poisoned store, with the ADR 0007
+overlay marking everything after the loss as `gap`) would keep it
+readable; it is on the backlog, not implemented. The live coverage
+overlay still covers non-ambiguous write failures, where the collector
+retries instead of the store poisoning itself.
 
 ### D3: idle resources' End placed at their last event (low)
 
