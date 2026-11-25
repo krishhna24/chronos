@@ -69,8 +69,13 @@ jobs:
           go-version-file: go.mod
       - run: ./hack/build-plugin-release.sh "$GITHUB_REF_NAME" dist
       # Verify with: gh attestation verify <archive> --repo krishhna24/chronos
+      # GitHub only stores artifact attestations for public repositories
+      # (or organization-owned private ones); on a user-owned private repo
+      # the API rejects them, so skip the step there. The archives still
+      # ship with sha256 checksums, and the image keeps its in-image
+      # SBOM and provenance from buildx.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        if: hashFiles('dist/kubectl-at_*') != ''
+        if: hashFiles('dist/kubectl-at_*') != '' && !github.event.repository.private
         with:
           subject-path: |
             dist/kubectl-at_*.tar.gz
