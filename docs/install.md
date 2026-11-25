@@ -168,6 +168,7 @@ Every server flag and the chart value that sets it:
 | `--redact-annotations` | `config.redactAnnotations` (list) | `[]` | removed from every object |
 | `--secret-annotation-allowlist` | `config.secretAnnotationAllowlist` (list) | `[]` | the only annotations kept on Secrets; all others are dropped (ADR 0005) |
 | `--stall-timeout` | `config.stallTimeout` | `5s` | a change waiting longer than this for the store ends coverage of its type and forces a relist |
+| `--degraded-exit-after` | `config.degradedExitAfter` | `10m` | when the store stops accepting writes (e.g. full volume), serve history read-only this long, then exit so the pod restarts |
 | `--keep-managed-fields` | `config.keepManagedFields` | `false` | |
 | `--log-level` | `config.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
 | `--log-format` | `config.logFormat` | `json` | `json` or `text` |

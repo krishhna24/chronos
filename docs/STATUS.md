@@ -104,9 +104,10 @@ golangci-lint 2.15. Not installed: helm (chart lint uses a container).
   time; assigned to collector). Integration-on-kind job skipped (depends on Go job).
 
 ## Known defects / follow-ups
-- Disk full is fail-stop: the store poisons itself on an ambiguous commit
-  failure and the process exits, so history is unreadable until space is
-  freed (no wrong answers). Backlog: read-only degraded mode.
+- Disk full: the store poisons itself on an ambiguous commit failure; the
+  server then serves history read-only with everything after the loss as
+  a gap, and exits after --degraded-exit-after (10m) so the pod restarts.
+  Recovery inside a still-full volume will crash-loop until space is freed.
 - Cluster-wide List at 10k live + 30k dead keys takes ~580 ms (target 100 ms);
   paging mitigates. Option: ListOptions.IncludeDeleted so the store can skip
   deleted keys (measured ~2.1x faster).

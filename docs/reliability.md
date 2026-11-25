@@ -195,11 +195,14 @@ stale `observed` answer was served: **no longer FAIL on correctness.**
 In Kubernetes the pod restarts; once space is available the restart
 writes a crash-recovery End and relists (covered by the crash scenarios).
 
-The cost is availability: while the disk stays full the API is down,
-although history before the loss is still valid. A degraded read-only
-mode (keep serving reads from the poisoned store, with the ADR 0007
-overlay marking everything after the loss as `gap`) would keep it
-readable; it is on the backlog, not implemented. The live coverage
+**Re-test 2 (same day, read-only mode, `be6a87f`).** The server now
+keeps serving after the store poisons itself: while the disk was full,
+`/api/v1/resources` showed configmaps coverage ending at the loss with
+reason "continuity lost; not yet recorded", and the lag check found all
+5,339 unrecorded writes inside that gap (`LOST=0`). Chronos's state was
+stale relative to the cluster but labelled `gap`, never `observed`
+(`verify -allow-gap`). It exits after `--degraded-exit-after` so a pod
+restart can recover; that restart path is the crash scenario. **D2: PASS.** The live coverage
 overlay still covers non-ambiguous write failures, where the collector
 retries instead of the store poisoning itself.
 

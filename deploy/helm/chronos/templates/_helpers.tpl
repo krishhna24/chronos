@@ -164,6 +164,7 @@ reach the server unchanged.
 - {{ printf "--secret-annotation-allowlist=%s" (join "," .) | quote }}
 {{- end }}
 - {{ printf "--stall-timeout=%s" (include "chronos.str" $c.stallTimeout) | quote }}
+- {{ printf "--degraded-exit-after=%s" (include "chronos.str" $c.degradedExitAfter) | quote }}
 {{- if $c.keepManagedFields }}
 - "--keep-managed-fields"
 {{- end }}

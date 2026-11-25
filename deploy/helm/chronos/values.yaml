@@ -47,6 +47,10 @@ config:
   # store, coverage of its type ends and the type is relisted, so recorded
   # change times are never late by more than this.
   stallTimeout: 5s
+  # --degraded-exit-after: when the store stops accepting writes (e.g. the
+  # volume is full), keep serving history read-only this long, then exit
+  # so the pod restarts. 0 exits immediately.
+  degradedExitAfter: 10m
   # --keep-managed-fields: store metadata.managedFields (large).
   keepManagedFields: false
   # --log-level: debug, info, warn or error.

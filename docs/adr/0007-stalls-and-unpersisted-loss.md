@@ -55,3 +55,14 @@ Chaos testing found two ways to break that promise:
 - During a store outage, answers degrade to `gap`/`unknown` immediately
   instead of after the store recovers.
 - Lists and diffs spanning the overlaid gap are `complete=false`.
+
+## Addendum (2026-11-25): read-only mode when the store stops accepting writes
+Re-testing D2 after the round-2 store fixes showed a third case: an
+ambiguous commit failure (disk full) poisons the store, the collector
+stops, and the process used to exit, taking the API down although the
+history before the loss is still valid. Now `cmd/chronos` keeps serving
+reads, overlays every resource as a gap from max(last heartbeat, latest
+record) -- the crash-recovery bound of ADR 0004 -- and exits after
+`--degraded-exit-after` (default 10m) so the pod restarts and recovery is
+attempted. Measured: while the disk was full the API kept answering and
+all 5,339 unrecorded writes fell inside the reported gap.
