@@ -5,17 +5,32 @@
 #
 #   docker build --build-arg VERSION=$(git describe --tags --always --dirty) -t chronos:dev .
 
-ARG NODE_IMAGE=node:26-alpine
-ARG GO_IMAGE=golang:1.26.11-alpine
-ARG RUNTIME_IMAGE=gcr.io/distroless/static:nonroot
+# Base images are pinned by multi-platform index digest (resolved with
+# `docker buildx imagetools inspect <image:tag>`); the tag is kept for
+# readers and for Dependabot/Renovate. Update tag and digest together.
+ARG NODE_IMAGE=node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
+ARG GO_IMAGE=golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
+ARG RUNTIME_IMAGE=gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 
 # ---- dashboard -------------------------------------------------------------
 # Always built for the build platform: the output is static JS/CSS.
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS web
 # Node >= 25 no longer ships corepack and web/package.json has no
-# packageManager field, so pnpm is pinned here explicitly.
+# packageManager field, so pnpm is pinned here: the npm registry tarball is
+# fetched, checked against a pinned sha512 (the registry's dist.integrity,
+# from `npm view pnpm@<version> dist.integrity`, base64-decoded), and
+# unpacked. Install scripts never run and nothing else is fetched; the
+# JavaScript entry point is used instead of the optional native binary.
 ARG PNPM_VERSION=12.21.0
-RUN npm install -g pnpm@${PNPM_VERSION} && pnpm --version
+ARG PNPM_SHA512=66fd8278ee28935ce951792d34367ff3af5c432a2756445823029533835b8da529bbe0be5130afd56ed0713fb8789e47bad82d93bd5ae2fe54b15562d6276ef0
+RUN set -eu; cd /tmp; \
+    npm pack --silent "pnpm@${PNPM_VERSION}"; \
+    echo "${PNPM_SHA512}  pnpm-${PNPM_VERSION}.tgz" | sha512sum -c -; \
+    mkdir -p /opt/pnpm; \
+    tar -xzf "pnpm-${PNPM_VERSION}.tgz" -C /opt/pnpm --strip-components=1; \
+    rm "pnpm-${PNPM_VERSION}.tgz"; \
+    ln -s /opt/pnpm/pnpm /usr/local/bin/pnpm; \
+    test "$(pnpm --version)" = "${PNPM_VERSION}"
 WORKDIR /src/web
 COPY web/package.json web/pnpm-lock.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
