@@ -230,6 +230,9 @@ func start(t *testing.T, st store.Store, clk *testingclock.FakeClock, servers []
 		Clock:         clk,
 		Logger:        testLogger(),
 		FlushInterval: -1,
+		// Tests move the fake clock in jumps, which the watchdog would
+		// rightly read as a frozen process; watchdog tests enable it.
+		WatchdogInterval: -1,
 		ListerWatcherFor: func(rt resources.Type) (cache.ListerWatcher, error) {
 			s, ok := byID[rt.ID()]
 			if !ok {

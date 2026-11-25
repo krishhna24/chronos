@@ -36,6 +36,7 @@ const (
 	DefaultWriteRetryTimeout = 30 * time.Second
 	DefaultShutdownTimeout   = 30 * time.Second
 	DefaultStallTimeout      = 5 * time.Second
+	DefaultWatchdogInterval  = time.Second
 )
 
 // Config configures a Collector.
@@ -72,8 +73,13 @@ type Config struct {
 	// ShutdownTimeout bounds the final flush and End writes. Default 30s.
 	ShutdownTimeout time.Duration
 	// StallTimeout: an event that waits longer than this for queue space
-	// ends the resource's coverage and forces a relist. Default 5s.
+	// ends the resource's coverage and forces a relist, and a gap longer
+	// than this between watchdog observations (the process did not run)
+	// ends every resource's coverage. Default 5s.
 	StallTimeout time.Duration
+	// WatchdogInterval is the stall watchdog's tick (ADR 0007 §1).
+	// Default 1s; negative disables the watchdog.
+	WatchdogInterval time.Duration
 
 	// ListerWatcherFor, if set, supplies the list/watch source of every
 	// resource instead of Dynamic/Metadata (tests, custom transports).
@@ -93,6 +99,17 @@ type ResourceStatus struct {
 	LastEventAt time.Time `json:"lastEventAt"`
 	// CoverageOpen: the store's latest coverage event is a Start.
 	CoverageOpen bool `json:"coverageOpen"`
+	// LostAt is set while continuity has been lost in memory (write
+	// failure, queue or process stall) but the End recording it is not
+	// yet durable, so the store still says observed from LostAt on. It is
+	// cleared once that End (or a later LIST) is committed, and is nil
+	// whenever the store's coverage is not open (ADR 0007 §2).
+	LostAt *time.Time `json:"lostAt,omitempty"`
+	// LastWriteError is the last store write error for a batch holding
+	// entries of this resource, and LastWriteErrorAt its time. They are
+	// not cleared by later successful writes.
+	LastWriteError   string     `json:"lastWriteError,omitempty"`
+	LastWriteErrorAt *time.Time `json:"lastWriteErrorAt,omitempty"`
 }
 
 // Collector records changes of the configured resource types into a store.
@@ -101,6 +118,7 @@ type Collector struct {
 	log        *slog.Logger
 	q          *queue
 	w          *writer
+	wd         *watchdog
 	res        []*resource
 	reflectors []*cache.Reflector
 	started    atomic.Bool
@@ -143,6 +161,9 @@ func New(cfg Config) (*Collector, error) {
 	}
 	if cfg.StallTimeout <= 0 {
 		cfg.StallTimeout = DefaultStallTimeout
+	}
+	if cfg.WatchdogInterval == 0 {
+		cfg.WatchdogInterval = DefaultWatchdogInterval
 	}
 
 	log := cfg.Logger.With("component", "collector")
@@ -188,6 +209,13 @@ func New(cfg Config) (*Collector, error) {
 		c.w.ordered = append(c.w.ordered, r)
 		c.res = append(c.res, r)
 		c.reflectors = append(c.reflectors, refl)
+	}
+	if cfg.WatchdogInterval > 0 {
+		c.wd = &watchdog{clock: cfg.Clock, interval: cfg.WatchdogInterval, stallTimeout: cfg.StallTimeout, log: log, q: c.q}
+		for _, r := range c.res {
+			c.wd.sources = append(c.wd.sources, r.src)
+			r.src.wd = c.wd
+		}
 	}
 	return c, nil
 }
@@ -263,6 +291,9 @@ func (c *Collector) Run(ctx context.Context) error {
 		wg.Go(func() { refl.RunWithContext(kctx) })
 	}
 	wg.Go(func() { c.heartbeats(rctx) })
+	if c.wd != nil {
+		wg.Go(func() { c.wd.run(rctx) })
+	}
 	c.log.Info("collector started", "resources", len(c.res))
 
 	var fatal error
@@ -328,6 +359,7 @@ func (c *Collector) heartbeats(ctx context.Context) {
 		// unhealthy and skips the heartbeat. Hence a written heartbeat
 		// never covers a received-but-unwritten change.
 		at := c.cfg.Clock.Now()
+		c.wd.observe(at) // a heartbeat tick late by > StallTimeout is a stall too
 		healthy := true
 		for _, r := range c.res {
 			if !r.src.healthy() {
@@ -346,9 +378,21 @@ func (c *Collector) Status() []ResourceStatus {
 	out := make([]ResourceStatus, 0, len(c.res))
 	for _, r := range c.res {
 		r.mu.Lock()
-		s := ResourceStatus{Resource: r.id, Synced: r.synced && !r.lost, CoverageOpen: r.covOpen}
+		s := ResourceStatus{Resource: r.id, Synced: r.synced && !r.lost, CoverageOpen: r.covOpen, LastWriteError: r.lastWriteErr}
+		lost := r.unrecordedLossAt
+		if !r.lastWriteErrAt.IsZero() {
+			t := r.lastWriteErrAt
+			s.LastWriteErrorAt = &t
+		}
 		r.mu.Unlock()
 		s.LastEventAt = r.src.lastEvent()
+		if sl := r.src.loss(); !sl.IsZero() && (lost.IsZero() || sl.Before(lost)) {
+			lost = sl
+		}
+		if s.CoverageOpen && !lost.IsZero() {
+			s.LostAt = &lost
+			s.Synced = false
+		}
 		out = append(out, s)
 	}
 	return out

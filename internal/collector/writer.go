@@ -29,6 +29,7 @@ const (
 	reasonShutdown     = "shutdown"
 	reasonWriteFailure = "write-failure"
 	reasonStall        = "stall"
+	reasonProcessStall = "process-stall"
 )
 
 type nsName struct{ ns, name string }
@@ -70,6 +71,12 @@ type resource struct {
 	lostAt  time.Time
 	// lostReason is the End reason when lostAt bounds the End.
 	lostReason string
+	// unrecordedLossAt: continuity lost (writer side) and not yet durable
+	// as an End; part of ResourceStatus.LostAt. Unlike lostAt it is
+	// cleared when the End commits, not when the relist completes.
+	unrecordedLossAt time.Time
+	lastWriteErr     string
+	lastWriteErrAt   time.Time
 }
 
 // endAt places an End for r at bound, moved forward as the store requires
@@ -91,6 +98,9 @@ func (r *resource) markLost(at time.Time, reason string) {
 		r.lost, r.synced = true, false
 		if r.lostAt.IsZero() || at.Before(r.lostAt) {
 			r.lostAt, r.lostReason = at, reason
+		}
+		if r.unrecordedLossAt.IsZero() || at.Before(r.unrecordedLossAt) {
+			r.unrecordedLossAt = at
 		}
 	})
 }
@@ -231,6 +241,8 @@ func (w *writer) run(ctx context.Context) error {
 				err = w.handleReplace(ctx, it)
 			case itemHeartbeat:
 				err = w.handleHeartbeat(ctx, it)
+			case itemProcessStall:
+				err = w.handleProcessStall(ctx, it)
 			case itemShutdown:
 				return w.handleShutdown(ctx, it)
 			}
@@ -313,14 +325,18 @@ func (w *writer) write(ctx context.Context, entries []store.Entry) error {
 		}
 		switch {
 		case errors.Is(err, store.ErrClosed):
+			w.recordWriteError(entries, err)
 			return errFatal{fmt.Errorf("collector: store closed: %w", err)}
 		case errors.Is(err, store.ErrInvalid):
+			w.recordWriteError(entries, err)
 			return fmt.Errorf("collector: store rejected batch: %w", err)
 		case ctx.Err() != nil:
 			return fmt.Errorf("collector: write: %w", ctx.Err())
 		case !w.clock.Now().Before(deadline):
+			w.recordWriteError(entries, err)
 			return fmt.Errorf("collector: write failed after %d attempts: %w", attempt, err)
 		}
+		w.recordWriteError(entries, err)
 		w.log.Warn("store write failed; retrying", "attempt", attempt, "entries", len(entries), "retryIn", delay, "err", err)
 		select {
 		case <-w.clock.After(delay):
@@ -328,6 +344,26 @@ func (w *writer) write(ctx context.Context, entries []store.Entry) error {
 			return fmt.Errorf("collector: write: %w", ctx.Err())
 		}
 		delay = min(delay*2, 5*time.Second)
+	}
+}
+
+// recordWriteError notes err as the last write error of every resource
+// with an entry in the failed batch (ResourceStatus.LastWriteError).
+func (w *writer) recordWriteError(entries []store.Entry, err error) {
+	now := w.clock.Now()
+	seen := map[*resource]bool{}
+	for _, e := range entries {
+		id := ""
+		switch {
+		case e.Record != nil:
+			id = e.Record.Key.Resource
+		case e.Coverage != nil:
+			id = e.Coverage.Resource
+		}
+		if r := w.byID[id]; r != nil && !seen[r] {
+			seen[r] = true
+			r.setState(func() { r.lastWriteErr, r.lastWriteErrAt = err.Error(), now })
+		}
 	}
 }
 
@@ -350,7 +386,16 @@ func (w *writer) applyWritten(entries []store.Entry) {
 			if open {
 				r.lastStartAt = e.Coverage.At
 			}
-			r.setState(func() { r.covOpen = open })
+			end := e.Coverage.At
+			r.setState(func() {
+				r.covOpen = open
+				if !open && !r.unrecordedLossAt.IsZero() && !r.unrecordedLossAt.After(end) {
+					r.unrecordedLossAt = time.Time{} // the loss is now durable
+				}
+			})
+			if !open {
+				r.src.endCommitted(end)
+			}
 		}
 	}
 }
@@ -547,7 +592,15 @@ func (w *writer) handleReplace(ctx context.Context, it item) error {
 	}
 	r.known = known
 	r.setState(func() { r.synced, r.lost, r.lostAt, r.lostReason = true, false, time.Time{}, "" })
-	r.src.relistDone()
+	r.src.relistDone(it.gen)
+	// Any loss before this LIST is resolved: either the End above is
+	// durable or coverage was already closed.
+	r.setState(func() {
+		if !r.unrecordedLossAt.IsZero() && !r.unrecordedLossAt.After(it.at) {
+			r.unrecordedLossAt = time.Time{}
+		}
+	})
+	r.src.endCommitted(it.at)
 	w.log.Info("list applied", "resource", r.id, "origin", origin.String(), "objects", len(listed),
 		"added", added, "modified", modified, "deleted", deleted, "coverageEnded", ended)
 	return nil
@@ -592,6 +645,42 @@ func (w *writer) lastObjects(ctx context.Context, r *resource, keys []nsName) (m
 		}
 	}
 	return out, nil
+}
+
+// handleProcessStall applies a watchdog trip (ADR 0007 §1): the process did
+// not run after it.lostAt, so changes stamped later may carry late times.
+// Pending records stamped after it.lostAt are dropped (the relist the
+// watchdog forced re-derives them), and every resource loses continuity
+// at it.lostAt. Records already written with later stamps cannot be
+// unwritten; the store then forces the End after them (resource.endAt),
+// which is logged.
+func (w *writer) handleProcessStall(ctx context.Context, it item) error {
+	kept := w.pending[:0]
+	dropped := 0
+	for _, e := range w.pending {
+		if e.Record != nil && e.Record.ObservedAt.After(it.lostAt) {
+			dropped++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	clear(w.pending[len(kept):])
+	w.pending = kept
+	if err := w.flush(ctx); err != nil {
+		return err
+	}
+	if dropped > 0 {
+		w.log.Info("dropped records stamped after the last on-time tick; the relist re-derives them",
+			"records", dropped, "lastOnTime", it.lostAt)
+	}
+	for _, r := range w.ordered {
+		if r.covOpen && r.lastRecAt.After(it.lostAt) {
+			w.log.Warn("records stamped after the last on-time tick were already written; End must follow them",
+				"resource", r.id, "lastOnTime", it.lostAt, "lastRecord", r.lastRecAt)
+		}
+		r.markLost(it.lostAt, reasonProcessStall)
+	}
+	return nil
 }
 
 func (w *writer) handleHeartbeat(ctx context.Context, it item) error {

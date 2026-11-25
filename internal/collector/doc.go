@@ -53,6 +53,13 @@
 // that costs at most a bookmark interval (~1 min) of coverage when a
 // resume then fails.
 //
+// Reliability D3 (accepted, no change): because of this, an idle
+// resource whose watch is lost ends coverage at its last event, bookmark
+// or LIST, possibly long before the watch actually broke, and an
+// interval can have zero length (End.At == Start.At, the instant of its
+// LIST). That shows a longer gap than strictly necessary, which is the
+// safe direction under ADR 0004; it is not fabricated continuity.
+//
 // Watch events become Records with origin=watch, ObservedAt from the
 // injected clock at receipt. An update whose normalized hash is unchanged
 // is skipped (debug log). Delete records carry the final state delivered
@@ -116,6 +123,45 @@
 // (change-detection state is reloaded from the store), and Starts again.
 // ErrInvalid is not retried; ErrClosed stops the collector.
 //
+// # Process stalls (ADR 0007 §1)
+//
+// A watchdog ticks every Config.WatchdogInterval (1s) on the injected
+// clock, and every receipt in a source reports its time to it as well. If
+// two consecutive observations are more than StallTimeout apart, the
+// process did not run in between (SIGSTOP, VM or container freeze, CPU
+// starvation), and anything received from then on may carry a late
+// stamp. Every source is marked stalled and relisted, and a stall item is
+// queued under the watchdog's lock, so no receipt that observes after the
+// trip can be queued ahead of it. The writer drops pending records stamped
+// after the last on-time observation and marks every resource lost there.
+// The relist writes End(last on-time observation, "process-stall"),
+// resyncs, and Starts.
+//
+// Receipts report to the watchdog because the first event delivered after
+// a freeze then trips it before that event is queued; the ticker alone
+// could let the backlog through first. If records stamped after the last
+// on-time observation were nevertheless already written (an item queued
+// between resume and the trip and flushed in a full batch), the store
+// requires End after them; resource.endAt places it there and the writer
+// logs it. The watchdog cannot see a slow API server delivering late
+// while this process runs normally (ADR 0002 delivery lag).
+//
+// A forced relist (write failure, queue stall, process stall) is
+// satisfied only by a LIST that started after the request (a generation
+// counter, not a time, so fake clocks cannot tie). A LIST already in
+// progress or queued when the watchdog tripped does not clear it.
+//
+// # Live coverage loss (ADR 0007 §2)
+//
+// ResourceStatus.LostAt reports continuity lost in memory but not yet
+// durable as an End: the earliest of a source-side loss (queue stall,
+// process stall; known even while the writer is stuck in a failing
+// Write, the disk-full case) and a writer-side loss (abandoned write,
+// failed list, process stall). It is cleared when an End at or after it
+// commits, or when a later LIST is applied, and is nil whenever coverage
+// is not open in the store. The query engine overlays it as gap. The last
+// store write error and its time are reported per resource and kept.
+//
 // # Startup and shutdown
 //
 // At startup the latest record of every key is loaded (View.List at a far
@@ -128,7 +174,9 @@
 // written before anything else.
 //
 // On context cancellation each source records whether it still had
-// continuity, the reflectors are stopped, and a shutdown item stamped
+// continuity, and only then are the reflectors stopped (they run on their
+// own context, not one derived from Run's, so they cannot tear their
+// watches down before that snapshot). A shutdown item stamped
 // after they stopped is queued; the writer flushes everything before it
 // and writes End("shutdown") for every open resource. The End is at the
 // shutdown time only for a source that was healthy when shutdown began
