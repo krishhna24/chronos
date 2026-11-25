@@ -100,23 +100,46 @@
 // index entries Compact removes). A newer manifest can still name a key
 // whose latest record at S was a delete older than the horizon, which
 // Compact removed with the key; the manifest header records the horizon it
-// was built under, and such entries are skipped when the horizon has moved
-// since.
+// was built under, and when the horizon has moved since (or a compaction
+// is still pending in the view) such an entry is skipped if its record is
+// gone, exactly as the scan path would no longer find it. No manifest is
+// written while a compaction is pending.
 //
 // # Concurrency, durability and shutdown
 //
 // Writes are validated in full against scratch bookkeeping, then committed
 // as one Pebble batch with pebble.Sync, so a failing batch leaves no trace
 // and a returned Write survives a crash. A View is a Pebble snapshot;
-// it reads the horizon from that snapshot too. Compact computes its
-// deletions from a snapshot and commits them in one synced batch without
-// blocking writers.
+// it reads the horizon from that snapshot too. Compact publishes the new
+// horizon first, then deletes records in bounded, synced chunks computed
+// from a snapshot, without blocking writers; see Store.Compact for why
+// every answer at t >= horizon is final at each step and how a crash
+// between chunks is resumed.
 //
 // Any commit failure is treated as ambiguous (Pebble may already have
 // applied the batch; a failed WAL fsync often leaves it durable), so the
 // store poisons itself: that call and every later mutation return an
 // error wrapping store.ErrClosed until the store is reopened, and a
-// retried batch can never be applied twice. Reads keep working.
+// retried batch can never be applied twice. Reads keep working. The same
+// applies when a commit is abandoned because the caller's context ended
+// while it was still inside Pebble.
+//
+// On-disk corruption found while reading (an SSTable block checksum
+// mismatch) is logged through a Pebble event listener and returned to the
+// reader as an error wrapping store.ErrCorrupt; it never terminates the
+// process.
+//
+// Not every Pebble failure is recoverable. Pebble calls Logger.Fatalf on
+// its own background goroutines for state it cannot continue from, for
+// example a failed MANIFEST write or sync during a flush or compaction
+// (version_set.go) or a failed version edit. The adapter turns Fatalf
+// into a panic, and on those goroutines nothing recovers it, so the
+// process exits; that is deliberate, because the in-memory LSM state no
+// longer matches disk, and a restart (which replays the WAL) is the right
+// recovery. Errors Pebble reports as recoverable reach the
+// EventListener.BackgroundError hook and are only logged. Fatalf on the
+// goroutine of a Store or View call (the commit pipeline, or a read) is
+// recovered: a commit poisons the store, a read returns ErrCorrupt.
 //
 // Close never blocks indefinitely on a writer. Writes queued for the
 // single writer slot return store.ErrClosed with nothing applied; a Write
