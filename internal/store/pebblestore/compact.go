@@ -76,13 +76,14 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 		deleted bool
 	}
 	last := map[model.ObjectKey]latest{}
-	it, err := snap.NewIterWithContext(ctx, &pebble.IterOptions{
+	it, err := newIter(ctx, snap, &pebble.IterOptions{
 		LowerBound: []byte{tabIndex},
 		UpperBound: indexKey(horizon),
 	})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	n := 0
 	for ok := it.First(); ok; ok = it.Next() {
 		if n++; n%ctxCheckEvery == 0 {
@@ -143,13 +144,14 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 
 	// Manifests older than the horizon: the time index entries they rely on
 	// for (S, T] are being removed, so they would give wrong answers.
-	it, err = snap.NewIterWithContext(ctx, &pebble.IterOptions{
+	it, err = newIter(ctx, snap, &pebble.IterOptions{
 		LowerBound: []byte{tabManifest},
 		UpperBound: manifestKey(horizon),
 	})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	for ok := it.First(); ok; ok = it.Next() {
 		mk := slices.Clone(it.Key())
 		if len(mk) != 1+timeLen {
@@ -174,7 +176,7 @@ func (s *Store) Compact(ctx context.Context, horizon time.Time) error {
 		return fmt.Errorf("pebblestore: compact: %w", err)
 	}
 	owned = false
-	if err := s.commitWait(b, "compaction commit"); err != nil {
+	if err := s.commitWait(ctx, b, "compaction commit"); err != nil {
 		return err
 	}
 	s.mu.Lock()

@@ -98,7 +98,7 @@ func (s *Store) Snapshot(ctx context.Context) error {
 	}
 	size := b.Len()
 	owned = false
-	if err := s.commitWait(b, "snapshot manifest commit"); err != nil {
+	if err := s.commitWait(ctx, b, "snapshot manifest commit"); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -151,13 +151,14 @@ func compareEntry(a, b listEntry) int {
 // manifest (none, older than the horizon, or failing validation); the
 // caller then uses the scan path.
 func (v *view) loadManifest(ctx context.Context, opts store.ListOptions) (h *manifestHeader, es []listEntry, ok bool, err error) {
-	it, err := v.snap.NewIterWithContext(ctx, &pebble.IterOptions{
+	it, err := newIter(ctx, v.snap, &pebble.IterOptions{
 		LowerBound: []byte{tabManifest},
 		UpperBound: atOrBefore([]byte{tabManifest}, opts.At),
 	})
 	if err != nil {
 		return nil, nil, false, err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	if !it.Last() {
 		return nil, nil, false, closeIter(it)
 	}
@@ -242,13 +243,14 @@ func (v *view) listFromManifest(ctx context.Context, opts store.ListOptions, fn 
 	// Keys changed in (S, At], with their latest change in that window.
 	window := map[model.ObjectKey]listEntry{}
 	if opts.At.After(s) {
-		it, err := v.snap.NewIterWithContext(ctx, &pebble.IterOptions{
+		it, err := newIter(ctx, v.snap, &pebble.IterOptions{
 			LowerBound: atOrBefore([]byte{tabIndex}, s),
 			UpperBound: atOrBefore([]byte{tabIndex}, opts.At),
 		})
 		if err != nil {
 			return true, err
 		}
+		defer func(it *iter) { _ = it.Close() }(it)
 		n := 0
 		for ok := it.First(); ok; ok = it.Next() {
 			if n++; n%ctxCheckEvery == 0 {

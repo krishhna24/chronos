@@ -120,6 +120,9 @@ type Store struct {
 	// mutation returns it (it wraps store.ErrClosed).
 	poisonMu sync.Mutex
 	poisoned error
+	// closeErr is the error of a Close that left Pebble open; repeated
+	// Close calls return it (guarded by mu).
+	closeErr error
 }
 
 // listStats counts which path served View.List (tests assert on it).
@@ -211,6 +214,20 @@ func pebbleOptions(opts Options, log *slog.Logger) (*pebble.Options, *pebble.Cac
 	}
 	if opts.fs != nil {
 		popts.FS = opts.fs
+	}
+	// Pebble's default DataCorruption handler calls Logger.Fatalf on the
+	// reading goroutine. Corruption of one table must surface as an error
+	// from the read (Pebble returns it to the caller after notifying the
+	// listener; mapPebbleErr turns it into store.ErrCorrupt), not crash
+	// the process, so log it instead. Background errors are logged as by
+	// default; Pebble itself decides which of them are fatal.
+	popts.EventListener = &pebble.EventListener{
+		DataCorruption: func(info pebble.DataCorruptionInfo) {
+			log.Error("pebble detected on-disk corruption", "path", info.Path, "details", info.Details)
+		},
+		BackgroundError: func(err error) {
+			log.Error("pebble background error", "err", err)
+		},
 	}
 	blockSize := opts.BlockSize
 	if blockSize <= 0 {
@@ -325,12 +342,14 @@ func (s *Store) opContext(ctx context.Context) (context.Context, context.CancelF
 }
 
 // commitWait commits b (taking ownership of it) on a separate goroutine
-// and waits for the result or for Close. Pebble commits cannot be
-// interrupted, so when Close wins the commit's outcome is unknown and the
-// error wraps store.ErrClosed, which the Write contract reserves for that
-// case. The goroutine is counted in s.ops so Close does not close Pebble
-// under it.
-func (s *Store) commitWait(b *pebble.Batch, what string) error {
+// and waits for the result, for ctx to end, or for Close. Pebble commits
+// cannot be interrupted, so when ctx or Close wins the commit's outcome is
+// unknown and the error wraps store.ErrClosed, which the Write contract
+// reserves for that case. Abandoning a commit because ctx ended also
+// poisons the store: the batch may still land, so no later mutation may
+// be accepted (a retry would apply it twice). The goroutine is counted in
+// s.ops so Close does not close Pebble under it.
+func (s *Store) commitWait(ctx context.Context, b *pebble.Batch, what string) error {
 	done := make(chan error, 1)
 	s.ops.Add(1)
 	go func() {
@@ -349,6 +368,16 @@ func (s *Store) commitWait(b *pebble.Batch, what string) error {
 		}
 		s.log.Warn("store closed while a commit was in flight", "op", what)
 		return fmt.Errorf("%w: pebblestore: store closed while the %s was in flight; whether it committed is unknown", store.ErrClosed, what)
+	case <-ctx.Done():
+		select {
+		case err := <-done:
+			return err
+		default:
+		}
+		if s.closing.Err() != nil {
+			return fmt.Errorf("%w: pebblestore: store closed while the %s was in flight; whether it committed is unknown", store.ErrClosed, what)
+		}
+		return s.poison(what, fmt.Errorf("abandoned while still inside Pebble (stuck I/O?), outcome unknown: %w", ctx.Err()))
 	}
 }
 
@@ -422,10 +451,11 @@ func (s *Store) load() error {
 		}
 	}
 
-	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{tabLastRec}, UpperBound: []byte{tabLastRec + 1}})
+	it, err := newIter(context.Background(), s.db, &pebble.IterOptions{LowerBound: []byte{tabLastRec}, UpperBound: []byte{tabLastRec + 1}})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	for ok := it.First(); ok; ok = it.Next() {
 		res, _, err := decodeComponent(it.Key()[1:])
 		if err != nil {
@@ -446,10 +476,11 @@ func (s *Store) load() error {
 	// Coverage tables are small (a few events per resource per day), so a
 	// full scan on open is cheap; the latest event per resource is the last
 	// one under its prefix.
-	it, err = s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{tabCoverage}, UpperBound: []byte{tabCoverage + 1}})
+	it, err = newIter(context.Background(), s.db, &pebble.IterOptions{LowerBound: []byte{tabCoverage}, UpperBound: []byte{tabCoverage + 1}})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	for ok := it.First(); ok; ok = it.Next() {
 		c, err := decodeCoverage(it.Key(), it.Value())
 		if err != nil {
@@ -462,10 +493,11 @@ func (s *Store) load() error {
 		return err
 	}
 
-	it, err = s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{tabManifest}, UpperBound: []byte{tabManifest + 1}})
+	it, err = newIter(context.Background(), s.db, &pebble.IterOptions{LowerBound: []byte{tabManifest}, UpperBound: []byte{tabManifest + 1}})
 	if err != nil {
 		return err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	if it.Last() {
 		if t, err := decodeTime(it.Key()[1:]); err == nil {
 			s.lastManifest = t
@@ -477,20 +509,60 @@ func (s *Store) load() error {
 }
 
 func (s *Store) isEmpty() (bool, error) {
-	it, err := s.db.NewIter(nil)
+	it, err := newIter(context.Background(), s.db, nil)
 	if err != nil {
 		return false, err
 	}
+	defer func(it *iter) { _ = it.Close() }(it)
 	empty := !it.First()
 	return empty, closeIter(it)
 }
 
-func closeIter(it *pebble.Iterator) error {
+// iter wraps a Pebble iterator so Close is idempotent: every iterator is
+// closed by a deferred Close (so a panic cannot leak it and make a later
+// Store.Close fail), and code paths may still close it early.
+type iter struct {
+	*pebble.Iterator
+	closed bool
+}
+
+func newIter(ctx context.Context, r pebbleReader, o *pebble.IterOptions) (*iter, error) {
+	it, err := r.NewIterWithContext(ctx, o)
+	if err != nil {
+		return nil, mapPebbleErr(err)
+	}
+	return &iter{Iterator: it}, nil
+}
+
+func (i *iter) Close() error {
+	if i.closed {
+		return nil
+	}
+	i.closed = true
+	return i.Iterator.Close()
+}
+
+// closeIter closes it and returns its first error.
+func closeIter(it *iter) error {
+	if it.closed {
+		return nil
+	}
 	err := it.Error()
 	if cerr := it.Close(); err == nil {
 		err = cerr
 	}
-	return err
+	return mapPebbleErr(err)
+}
+
+// mapPebbleErr turns Pebble's on-disk corruption errors (SSTable block
+// checksum mismatches and the like) into errors wrapping store.ErrCorrupt.
+// Pebble's message names the table ("file 000012: block ..."); where the
+// read was for a known key the store's own context names that too.
+func mapPebbleErr(err error) error {
+	if err == nil || errors.Is(err, store.ErrCorrupt) || !pebble.IsCorruptionError(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", store.ErrCorrupt, err)
 }
 
 // Write implements store.Store.
@@ -636,7 +708,7 @@ func (s *Store) Write(ctx context.Context, entries []store.Entry) error {
 		return fmt.Errorf("pebblestore: build batch: %w", err)
 	}
 	owned = false
-	if err := s.commitWait(b, fmt.Sprintf("commit of a %d-entry batch", len(entries))); err != nil {
+	if err := s.commitWait(ctx, b, fmt.Sprintf("commit of a %d-entry batch", len(entries))); err != nil {
 		return err
 	}
 
@@ -679,7 +751,7 @@ func (s *Store) SetHeartbeat(ctx context.Context, t time.Time) error {
 		_ = b.Close()
 		return fmt.Errorf("pebblestore: write heartbeat: %w", err)
 	}
-	if err := s.commitWait(b, "heartbeat commit"); err != nil {
+	if err := s.commitWait(ctx, b, "heartbeat commit"); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -742,8 +814,9 @@ func (s *Store) forgetView(v *view) {
 func (s *Store) Close() error {
 	s.mu.Lock()
 	if s.closed {
+		err := s.closeErr
 		s.mu.Unlock()
-		return nil
+		return err
 	}
 	s.closed = true
 	s.mu.Unlock()
@@ -764,7 +837,11 @@ func (s *Store) Close() error {
 	case <-idle:
 	case <-time.After(s.closeTimeout):
 		s.log.Error("close timed out waiting for an in-flight commit; leaving Pebble open", "timeout", s.closeTimeout)
-		return fmt.Errorf("pebblestore: close: an in-flight commit did not finish within %s (stuck I/O?); Pebble was left open", s.closeTimeout)
+		err := fmt.Errorf("pebblestore: close: an in-flight commit did not finish within %s (stuck I/O?); Pebble was left open", s.closeTimeout)
+		s.mu.Lock()
+		s.closeErr = err // later Close calls report it too
+		s.mu.Unlock()
+		return err
 	}
 
 	s.mu.Lock()
@@ -775,7 +852,11 @@ func (s *Store) Close() error {
 		v.closeSnapshot()
 	}
 	if err := s.db.Close(); err != nil {
-		return fmt.Errorf("pebblestore: close: %w", err)
+		err = fmt.Errorf("pebblestore: close: %w", err)
+		s.mu.Lock()
+		s.closeErr = err
+		s.mu.Unlock()
+		return err
 	}
 	s.log.Info("store closed", "seq", s.seq)
 	return nil
