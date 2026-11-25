@@ -76,6 +76,9 @@ type Options struct {
 	compactChunkDeletes int
 	compactChunkBytes   int
 	compactChunkHook    func(chunk int) error
+	// manifestWindowMin overrides defaultManifestWindowMin when > 0, and
+	// disables the absolute allowance when < 0 (tests).
+	manifestWindowMin int
 }
 
 // Store is a durable store.Store backed by Pebble. It is safe for
@@ -118,6 +121,7 @@ type Store struct {
 	compactChunkDeletes int
 	compactChunkBytes   int
 	compactChunkHook    func(chunk int) error
+	manifestWindowMin   int
 
 	// maintMu serializes Compact and Snapshot, which both rewrite manifests.
 	maintMu sync.Mutex
@@ -141,6 +145,9 @@ type listStats struct {
 	manifest  atomic.Int64 // served from a snapshot manifest
 	scan      atomic.Int64 // served by prefix scan (no usable manifest)
 	fallbacks atomic.Int64 // manifest present but unusable
+	// windowSkips: manifest usable but too many changes since it
+	windowSkips atomic.Int64
+	chunkReads  atomic.Int64 // manifest namespace chunks read
 }
 
 var _ store.Store = (*Store)(nil)
@@ -177,6 +184,13 @@ func Open(dir string, opts Options) (*Store, error) {
 		compactChunkDeletes: opts.compactChunkDeletes,
 		compactChunkBytes:   opts.compactChunkBytes,
 		compactChunkHook:    opts.compactChunkHook,
+		manifestWindowMin:   opts.manifestWindowMin,
+	}
+	switch {
+	case s.manifestWindowMin == 0:
+		s.manifestWindowMin = defaultManifestWindowMin
+	case s.manifestWindowMin < 0:
+		s.manifestWindowMin = 0
 	}
 	if s.compactChunkDeletes <= 0 {
 		s.compactChunkDeletes = defaultCompactChunkDeletes

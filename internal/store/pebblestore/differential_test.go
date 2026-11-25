@@ -65,7 +65,10 @@ type diffHarness struct {
 // by seed) so multi-batch compactions are exercised.
 func (h *diffHarness) open() *Store {
 	h.t.Helper()
-	s, err := Open(h.dir, Options{Logger: testLogger(), SnapshotInterval: -1, compactChunkDeletes: 1 + int(h.seed%7)})
+	// Vary the manifest window allowance so both the manifest path and
+	// its "too many changes since the manifest" fallback are exercised.
+	window := []int{-1, 5, 0}[h.seed%3]
+	s, err := Open(h.dir, Options{Logger: testLogger(), SnapshotInterval: -1, compactChunkDeletes: 1 + int(h.seed%7), manifestWindowMin: window})
 	if err != nil {
 		h.t.Fatalf("Open: %v", err)
 	}
@@ -402,6 +405,7 @@ func (h *diffHarness) compareViews(where string, mv, pv store.View) {
 			func(fn func(model.Record) error) error { return pview.listScan(ctx, opts, fn) },
 			func(fn func(model.Record) error) error { return pv.List(ctx, opts, fn) })
 	}
+	h.comparePagedWalk(where, mv, pv)
 	for range 3 {
 		k := h.randKey()
 		from, to := h.randTime(), h.randTime()
@@ -486,4 +490,55 @@ func diffCoverage(a, b []model.CoverageEvent) string {
 		}
 	}
 	return ""
+}
+
+var errPageFull = errors.New("page full")
+
+// comparePagedWalk pages through a List the way the query layer does: a
+// callback that stops after a page of k records, then After = the last
+// key returned. Every page must match memstore and the scan path.
+func (h *diffHarness) comparePagedWalk(where string, mv, pv store.View) {
+	ctx := context.Background()
+	opts := store.ListOptions{Resource: h.pick(diffResources), At: h.randTime()}
+	if h.r.IntN(2) == 0 {
+		opts.At = h.cursor.Add(time.Second)
+	}
+	if h.r.IntN(3) == 0 {
+		opts.Namespace = h.pick(diffNamespaces)
+	}
+	k := 1 + h.r.IntN(4)
+	page := func(run func(store.ListOptions, func(model.Record) error) error, o store.ListOptions) []model.Record {
+		var out []model.Record
+		err := run(o, func(r model.Record) error {
+			r.Object = slices.Clone(r.Object)
+			out = append(out, r)
+			if len(out) == k {
+				return errPageFull
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, errPageFull) {
+			h.t.Fatalf("%s: paged List(%+v): %v", where, o, err)
+		}
+		return out
+	}
+	memRun := func(o store.ListOptions, fn func(model.Record) error) error { return mv.List(ctx, o, fn) }
+	pebRun := func(o store.ListOptions, fn func(model.Record) error) error { return pv.List(ctx, o, fn) }
+	scanRun := func(o store.ListOptions, fn func(model.Record) error) error { return pv.(*view).listScan(ctx, o, fn) }
+	for n := 0; n < 200; n++ {
+		m, p, sc := page(memRun, opts), page(pebRun, opts), page(scanRun, opts)
+		if summarize(m) != summarize(p) || summarize(p) != summarize(sc) {
+			h.t.Fatalf("%s: page %d of %+v (after=%v, k=%d):\nmem  %s\npeb  %s\nscan %s", where, n, opts, opts.After, k, summarize(m), summarize(p), summarize(sc))
+		}
+		for i := range m {
+			if d := diffRecord(m[i], p[i]); d != "" {
+				h.t.Fatalf("%s: page %d record %d: %s", where, n, i, d)
+			}
+		}
+		if len(m) < k {
+			return
+		}
+		last := m[len(m)-1].Key
+		opts.After = &last
+	}
 }

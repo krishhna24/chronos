@@ -80,9 +80,20 @@
 // manifest with S <= T: it merges the manifest entries with the keys
 // changed in (S, T] (from the T index) and reads each key's version by
 // exact key. Manifests are written by a background job every
-// Options.SnapshotInterval and are always derivable from the journal: a
-// missing, truncated or corrupt manifest (header or chunk) is detected
-// before anything is returned and List falls back to the prefix scan.
+// Options.SnapshotInterval and are always derivable from the journal.
+//
+// Paged Lists stay O(page). Namespace chunks are read only when the merge
+// reaches them, and chunks before ListOptions.After are never read. The
+// time-index window (S, T] is ordered by time rather than key, so it must
+// be read in full before the first record; the manifest path is therefore
+// used only when the window is small (at most 1,024 records, or a quarter
+// of the manifest's entries for the resource), which the store knows
+// without reading it because every change since S consumed one Seq.
+// Otherwise List takes the prefix scan, which is lazy by construction.
+// A corrupt or missing manifest header is detected before anything is
+// returned and List uses the scan; a chunk found unusable part-way
+// through hands over to the scan after the last key already emitted, so
+// results are identical and nothing is repeated.
 //
 // ADR 0001 describes manifests as listing only keys whose latest record is
 // not a delete. View.List, however, must report keys whose latest record
