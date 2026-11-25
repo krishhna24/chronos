@@ -236,6 +236,9 @@ func TestRestartAfterCleanShutdown(t *testing.T) {
 	h := start(t, st, clk, []*fakeServer{srv})
 	srv.watcher(t)
 	waitJournal(t, st, cmID, "Added/baseline ns/a ua", "Added/baseline ns/b ub", "Start")
+	// A clean shutdown of a healthy source (watch open) ends at the
+	// shutdown time; wait for that precondition rather than racing it.
+	eventually(t, "source healthy", h.c.res[0].src.healthy)
 	clk.SetTime(t0.Add(time.Second))
 	if err := h.stop(); err != nil {
 		t.Fatalf("Run: %v", err)

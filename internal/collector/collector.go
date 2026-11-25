@@ -247,7 +247,13 @@ func (c *Collector) Run(ctx context.Context) error {
 	werr := make(chan error, 1)
 	go func() { werr <- c.w.run(wctx) }()
 
-	rctx, rcancel := context.WithCancel(ctx)
+	// The reflectors must not see ctx's cancellation directly: shutdown
+	// first snapshots each source's continuity (stopping) and only then
+	// stops them. If they shared ctx, a reflector could tear down its
+	// watch before the snapshot, and a healthy source would be recorded
+	// as having lost continuity at its last event instead of ending at
+	// the shutdown time.
+	rctx, rcancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer rcancel()
 	kctx := klog.NewContext(rctx, logr.FromSlogHandler(c.log.Handler()))
 	var wg sync.WaitGroup
